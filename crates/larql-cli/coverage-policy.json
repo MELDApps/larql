@@ -1,0 +1,19 @@
+{
+  "policy_note": "CLI is a binary crate with most code under `commands/` doing CLI parsing, dispatch, or I/O against live models/servers — hard to unit-test cleanly. This policy is scoped to the `bench/` subtree (the recent refactor in `commands/primary/bench/`), where pure helpers (helpers.rs, row.rs) hit 100% and the I/O-heavy modules live on debt baselines that should ratchet upward as integration tests land. Per-file entries are debt baselines from cargo-llvm-cov on 2026-05-15 — they must only ratchet *upward*. New files under bench/ must hit the 90% default on first commit. Total floor reflects the whole-package number on the same date.",
+  "include_globs": [
+    "crates/larql-cli/src/commands/primary/bench/*.rs",
+    "crates/larql-cli/src/commands/primary/bench/**/*.rs"
+  ],
+  "exclude_globs": [],
+  "default_line_min_percent": 90.0,
+  "total_line_min_percent": 7.0,
+  "per_file_line_min_percent": {
+    "crates/larql-cli/src/commands/primary/bench/engine.rs": 12.9,
+    "crates/larql-cli/src/commands/primary/bench/local.rs": 7.7,
+    "crates/larql-cli/src/commands/primary/bench/ollama.rs": 0.0,
+    "crates/larql-cli/src/commands/primary/bench/output.rs": 0.0,
+    "crates/larql-cli/src/commands/primary/bench/remote_ffn.rs": 35.3,
+    "crates/larql-cli/src/commands/primary/bench/remote_moe.rs": 0.0,
+    "crates/larql-cli/src/commands/primary/bench/run.rs": 0.0
+  }
+}

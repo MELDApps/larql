@@ -88,7 +88,7 @@ enum Commands {
     Rm(rm_cmd::RmArgs),
 
     /// Benchmark decode throughput on a real vindex (Metal / CPU / Ollama).
-    Bench(bench_cmd::BenchArgs),
+    Bench(bench::BenchArgs),
 
     /// Shannon-style next-token bit measurements and demo compression.
     #[command(subcommand)]
@@ -534,7 +534,7 @@ fn real_main() -> i32 {
         // ── Primary ──
         Commands::Run(args) => run_cmd::run(args),
         Commands::Chat(args) => run_cmd::run(args.into()),
-        Commands::Bench(args) => bench_cmd::run(args),
+        Commands::Bench(args) => bench::run(args),
         Commands::Shannon(cmd) => shannon_cmd::run(cmd),
         Commands::Pull(args) => pull_cmd::run(args),
         Commands::Model(args) => model_cmd::run(args),
