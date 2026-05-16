@@ -31,6 +31,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 minijinja = "2"
 libc = "0.2"
+rayon = "1.10"
 
 [features]
 default = ["metal"]

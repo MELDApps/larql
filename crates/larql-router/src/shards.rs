@@ -118,8 +118,7 @@ mod tests {
 
     #[test]
     fn parse_shards_skips_blank_and_trims_whitespace() {
-        let out =
-            parse_shards("  0-3 = http://a:8080 , , 4-7 = http://b:8080 ").unwrap();
+        let out = parse_shards("  0-3 = http://a:8080 , , 4-7 = http://b:8080 ").unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].url, "http://a:8080");
     }
@@ -138,8 +137,12 @@ mod tests {
 
     #[test]
     fn parse_shards_rejects_non_numeric_endpoints() {
-        assert!(parse_shards("a-3=http://a").unwrap_err().contains("invalid start"));
-        assert!(parse_shards("0-z=http://a").unwrap_err().contains("invalid end"));
+        assert!(parse_shards("a-3=http://a")
+            .unwrap_err()
+            .contains("invalid start"));
+        assert!(parse_shards("0-z=http://a")
+            .unwrap_err()
+            .contains("invalid end"));
     }
 
     #[test]
@@ -150,8 +153,12 @@ mod tests {
 
     #[test]
     fn parse_shards_rejects_empty_spec() {
-        assert!(parse_shards("").unwrap_err().contains("no shards specified"));
-        assert!(parse_shards(", ,").unwrap_err().contains("no shards specified"));
+        assert!(parse_shards("")
+            .unwrap_err()
+            .contains("no shards specified"));
+        assert!(parse_shards(", ,")
+            .unwrap_err()
+            .contains("no shards specified"));
     }
 
     // ── Shard::owns ──────────────────────────────────────────────────────

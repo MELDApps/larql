@@ -1268,7 +1268,11 @@ fn detect_architecture_errors_when_required_fields_are_missing() {
             assert_eq!(path, tmp.path().join(CONFIG_FILE_NAME));
             // Every required field should be reported as missing, in
             // declared order, so the user sees the full set to fix.
-            assert_eq!(missing, REQUIRED_CONFIG_FIELDS.to_vec());
+            // REQUIRED_CONFIG_FIELDS is a list of alias lists; the
+            // validator reports the canonical (first-listed) name from
+            // each.
+            let expected: Vec<&str> = REQUIRED_CONFIG_FIELDS.iter().map(|a| a[0]).collect();
+            assert_eq!(missing, expected);
         }
         other => panic!("expected ConfigFieldsMissing, got {other:?}"),
     }
@@ -1521,4 +1525,227 @@ fn test_detect_deepseek_v4_defaults_when_optional_fields_missing() {
     // them for arch-comparison purposes).
     assert_eq!(arch.kv_lora_rank(), 1024);
     assert_eq!(arch.q_lora_rank(), 1024);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// norm_eps parsing — covers bug 2 from
+// docs/diagnoses/shannon-cross-engine-divergence.md (rms_norm_eps was
+// hardcoded to 1e-6 in `ModelArchitecture::norm_eps()`, ignoring the
+// model's config.json).
+// ═══════════════════════════════════════════════════════════════
+
+fn minimal_llama_config(extra: serde_json::Value) -> serde_json::Value {
+    let mut base = serde_json::json!({
+        "model_type": "llama",
+        "hidden_size": 2048,
+        "num_hidden_layers": 16,
+        "intermediate_size": 8192,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+    });
+    if let serde_json::Value::Object(extra) = extra {
+        for (k, v) in extra {
+            base[k] = v;
+        }
+    }
+    base
+}
+
+#[test]
+fn norm_eps_from_rms_norm_eps_field() {
+    // Llama / Mistral / Gemma all ship `rms_norm_eps`. Parser must read it
+    // and `arch.norm_eps()` must return the parsed value, not the 1e-6
+    // default. This is the root cause of the +8.2% Mistral 7B drift.
+    let arch = detect_from_json(&minimal_llama_config(serde_json::json!({
+        "rms_norm_eps": 1e-5,
+    })));
+    assert_eq!(arch.config().norm_eps, Some(1e-5));
+    assert_eq!(arch.norm_eps(), 1e-5);
+}
+
+#[test]
+fn norm_eps_from_layer_norm_epsilon_field() {
+    // GPT-2 family uses `layer_norm_epsilon`. Same parser, same trait
+    // method, same outcome.
+    let arch = detect_from_json(&minimal_llama_config(serde_json::json!({
+        "model_type": "gpt2",
+        "layer_norm_epsilon": 1e-5,
+    })));
+    assert_eq!(arch.config().norm_eps, Some(1e-5));
+    assert_eq!(arch.norm_eps(), 1e-5);
+}
+
+#[test]
+fn norm_eps_from_norm_epsilon_field() {
+    // StarCoder2 uses `norm_epsilon`. This was the unfixed bug surfaced
+    // by the multi-arch diagnostic sweep on 2026-05-16.
+    let arch = detect_from_json(&minimal_llama_config(serde_json::json!({
+        "model_type": "starcoder2",
+        "norm_epsilon": 1e-5,
+    })));
+    assert_eq!(arch.config().norm_eps, Some(1e-5));
+    assert_eq!(arch.norm_eps(), 1e-5);
+}
+
+#[test]
+fn norm_eps_falls_back_to_default_when_absent() {
+    // No eps field in config → trait fallback (`DEFAULT_NORM_EPS = 1e-6`).
+    // Older models (Llama 1, Gemma 1, BERT) relied on this.
+    let arch = detect_from_json(&minimal_llama_config(serde_json::json!({})));
+    assert!(arch.config().norm_eps.is_none());
+    assert_eq!(arch.norm_eps(), crate::defaults::DEFAULT_NORM_EPS);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// rope_scaling parsing — covers bugs 1 and 3 from the diagnostic doc.
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn gemma3_rope_scaling_structured_per_layer_type_parses() {
+    // HF's `Gemma3TextConfig` expands the flat `rope_scaling = {factor: 8,
+    // rope_type: linear}` to a structured per-layer-type dict. Some on-disk
+    // dumps include the structured form directly; the parser must lift the
+    // `full_attention` slot and mark `gemma3_global_only`.
+    let arch = detect_from_json(&serde_json::json!({
+        "model_type": "gemma3",
+        "text_config": {
+            "model_type": "gemma3_text",
+            "hidden_size": 2560,
+            "head_dim": 256,
+            "num_hidden_layers": 34,
+            "num_attention_heads": 8,
+            "intermediate_size": 10240,
+            "sliding_window": 1024,
+            "rope_scaling": {
+                "full_attention": {"rope_type": "linear", "factor": 8.0},
+                "sliding_attention": {"rope_type": "default"},
+            },
+        },
+    }));
+    let rs = arch
+        .config()
+        .rope_scaling
+        .as_ref()
+        .expect("rope_scaling parsed");
+    assert_eq!(rs.scaling_type, "linear");
+    assert_eq!(rs.factor, 8.0);
+    assert!(
+        rs.gemma3_global_only,
+        "structured form must set gemma3_global_only"
+    );
+}
+
+#[test]
+fn gemma3_arch_rope_position_divisor_only_on_global_layers() {
+    // The Gemma 3 4B fix: divide RoPE positions by `factor` only on
+    // full-attention (global) layers — layers 5, 11, 17, 23, 29 in the
+    // standard 34-layer pattern (every 6th). Sliding layers stay at 1.0.
+    let arch = detect_from_json(&serde_json::json!({
+        "model_type": "gemma3",
+        "text_config": {
+            "model_type": "gemma3_text",
+            "hidden_size": 2560,
+            "head_dim": 256,
+            "num_hidden_layers": 34,
+            "num_attention_heads": 8,
+            "intermediate_size": 10240,
+            "sliding_window": 1024,
+            "rope_scaling": {
+                "full_attention": {"rope_type": "linear", "factor": 8.0},
+                "sliding_attention": {"rope_type": "default"},
+            },
+        },
+    }));
+    // Layer 5: global (5 + 1 = 6, multiple of 6) → factor.
+    assert_eq!(arch.rope_position_divisor_for_layer(5), 8.0);
+    assert_eq!(arch.rope_position_divisor_for_layer(11), 8.0);
+    // Layer 0, 1, 4: sliding → 1.0 (no scaling).
+    assert_eq!(arch.rope_position_divisor_for_layer(0), 1.0);
+    assert_eq!(arch.rope_position_divisor_for_layer(4), 1.0);
+    assert_eq!(arch.rope_position_divisor_for_layer(6), 1.0);
+}
+
+#[test]
+fn llama3_rope_scaling_parsed_with_all_four_fields() {
+    // Llama-3.2's config ships the full wavelength-band parameter set.
+    // The parser must capture all four optional fields on RopeScaling.
+    let arch = detect_from_json(&minimal_llama_config(serde_json::json!({
+        "rope_scaling": {
+            "rope_type": "llama3",
+            "factor": 32.0,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192,
+        },
+    })));
+    let rs = arch
+        .config()
+        .rope_scaling
+        .as_ref()
+        .expect("rope_scaling parsed");
+    assert_eq!(rs.scaling_type, "llama3");
+    assert_eq!(rs.factor, 32.0);
+    assert_eq!(rs.llama3_low_freq_factor, Some(1.0));
+    assert_eq!(rs.llama3_high_freq_factor, Some(4.0));
+    assert_eq!(rs.llama3_original_max_position_embeddings, Some(8192.0));
+    assert!(!rs.gemma3_global_only);
+}
+
+#[test]
+fn llama_arch_returns_llama3_rope_scaling_when_configured() {
+    // The arch method exposes the parsed scaling to the forward path. With
+    // `rope_type=llama3`, the four wavelength-band parameters must flow
+    // through unchanged. With `rope_type=default`, the method returns None.
+    let arch = detect_from_json(&minimal_llama_config(serde_json::json!({
+        "rope_scaling": {
+            "rope_type": "llama3",
+            "factor": 32.0,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192,
+        },
+    })));
+    let scaling = arch
+        .llama3_rope_scaling()
+        .expect("llama3 scaling exposed by arch");
+    assert_eq!(scaling.factor, 32.0);
+    assert_eq!(scaling.low_freq_factor, 1.0);
+    assert_eq!(scaling.high_freq_factor, 4.0);
+    assert_eq!(scaling.original_max_position_embeddings, 8192.0);
+
+    // Non-llama3 rope_type → arch returns None.
+    let arch_linear = detect_from_json(&minimal_llama_config(serde_json::json!({
+        "rope_scaling": {"rope_type": "linear", "factor": 2.0},
+    })));
+    assert!(arch_linear.llama3_rope_scaling().is_none());
+}
+
+// ═══════════════════════════════════════════════════════════════
+// GPT-2 legacy config-key aliases (n_embd / n_layer / n_head / n_inner).
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn gpt2_legacy_field_aliases_parsed() {
+    // GPT-2 ships `n_embd` / `n_layer` / `n_head`; HF transformers reads
+    // these aliases via its config class. The parser's alias lists in
+    // `config_io.rs` must accept them so the `gpt2` arch can be detected
+    // from a raw `openai-community/gpt2` config.json.
+    //
+    // `n_inner` is absent (GPT-2 base config); the parser fills
+    // `intermediate_size = 4 * n_embd` model-side.
+    let arch = detect_from_json(&serde_json::json!({
+        "model_type": "gpt2",
+        "n_embd": 768,
+        "n_layer": 12,
+        "n_head": 12,
+        "layer_norm_epsilon": 1e-5,
+    }));
+    assert_eq!(arch.family(), "gpt2");
+    assert_eq!(arch.config().hidden_size, 768);
+    assert_eq!(arch.config().num_layers, 12);
+    assert_eq!(arch.config().num_q_heads, 12);
+    // Derived: 4 * n_embd = 3072 when n_inner / intermediate_size absent.
+    assert_eq!(arch.config().intermediate_size, 3072);
+    // Eps alias also resolves.
+    assert_eq!(arch.norm_eps(), 1e-5);
 }

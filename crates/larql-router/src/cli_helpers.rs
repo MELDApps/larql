@@ -18,10 +18,7 @@ pub fn filter_legacy_route_arg(args: Vec<String>) -> Vec<String> {
 /// Daemon startup validation: at least one of `--shards` / `--grid-port`
 /// must be supplied. Returns the user-facing error message that
 /// `main.rs` prints to stderr.
-pub fn validate_daemon_inputs(
-    shards: Option<&str>,
-    grid_port: Option<u16>,
-) -> Result<(), String> {
+pub fn validate_daemon_inputs(shards: Option<&str>, grid_port: Option<u16>) -> Result<(), String> {
     if shards.is_none() && grid_port.is_none() {
         return Err("must provide --shards or --grid-port (or both)".into());
     }

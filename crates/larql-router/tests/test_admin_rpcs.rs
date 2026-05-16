@@ -41,10 +41,7 @@ async fn join_and_announce(
     listen_url: &str,
     layers: (u32, u32),
     hash: &str,
-) -> (
-    mpsc::Sender<ServerMessage>,
-    tonic::Streaming<RouterMessage>,
-) {
+) -> (mpsc::Sender<ServerMessage>, tonic::Streaming<RouterMessage>) {
     let mut client = GridServiceClient::connect(format!("http://{addr}"))
         .await
         .unwrap();
@@ -71,10 +68,7 @@ async fn join_and_announce(
 
 async fn join_and_available(
     addr: std::net::SocketAddr,
-) -> (
-    mpsc::Sender<ServerMessage>,
-    tonic::Streaming<RouterMessage>,
-) {
+) -> (mpsc::Sender<ServerMessage>, tonic::Streaming<RouterMessage>) {
     let mut client = GridServiceClient::connect(format!("http://{addr}"))
         .await
         .unwrap();
@@ -242,7 +236,10 @@ async fn assign_range_with_live_replica_dispatches_to_any_spare() {
         .unwrap()
         .unwrap();
     let Some(RouterPayload::Assign(a)) = observed.payload else {
-        panic!("expected Assign on the spare's inbound, got {:?}", observed.payload);
+        panic!(
+            "expected Assign on the spare's inbound, got {:?}",
+            observed.payload
+        );
     };
     assert_eq!(a.model_id, "m");
     assert_eq!(a.layer_start, 0);
@@ -260,8 +257,7 @@ async fn assign_range_with_live_replica_dispatches_to_any_spare() {
 #[tokio::test]
 async fn admin_status_returns_rendered_lines() {
     let (addr, _state) = spawn_router().await;
-    let (_donor, _inbound) =
-        join_and_announce(addr, "http://srv:8080", (0, 4), "h").await;
+    let (_donor, _inbound) = join_and_announce(addr, "http://srv:8080", (0, 4), "h").await;
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let lines = larql_router::admin::admin_status(&format!("http://{addr}"))
@@ -284,8 +280,7 @@ async fn admin_gaps_reports_no_gaps_when_grid_empty() {
 #[tokio::test]
 async fn admin_drain_returns_ack() {
     let (addr, state) = spawn_router().await;
-    let (_donor, mut inbound) =
-        join_and_announce(addr, "http://srv:8080", (0, 4), "h").await;
+    let (_donor, mut inbound) = join_and_announce(addr, "http://srv:8080", (0, 4), "h").await;
     let _ = tokio::time::timeout(Duration::from_secs(1), inbound.next()).await; // Ack
 
     let server_id = tokio::time::timeout(Duration::from_secs(2), async {
@@ -301,26 +296,19 @@ async fn admin_drain_returns_ack() {
     .await
     .expect("server registers");
 
-    let ack = larql_router::admin::admin_drain(
-        &format!("http://{addr}"),
-        &server_id,
-        "test-reason",
-    )
-    .await
-    .expect("admin_drain RPC");
+    let ack =
+        larql_router::admin::admin_drain(&format!("http://{addr}"), &server_id, "test-reason")
+            .await
+            .expect("admin_drain RPC");
     assert!(ack.ok);
 }
 
 #[tokio::test]
 async fn admin_drain_unknown_id_returns_failure_ack() {
     let (addr, _state) = spawn_router().await;
-    let ack = larql_router::admin::admin_drain(
-        &format!("http://{addr}"),
-        "no-such",
-        "test-reason",
-    )
-    .await
-    .expect("admin_drain RPC");
+    let ack = larql_router::admin::admin_drain(&format!("http://{addr}"), "no-such", "test-reason")
+        .await
+        .expect("admin_drain RPC");
     assert!(!ack.ok);
     assert!(ack.message.contains("not currently serving"));
 }
@@ -375,8 +363,7 @@ async fn admin_assign_invalid_layers_errors_before_rpc() {
         "",
     )
     .await
-    .err()
-    .expect("invalid --layers should fail before the RPC");
+    .expect_err("invalid --layers should fail before the RPC");
     let msg = format!("{err}");
     assert!(
         msg.contains("expected START-END") || msg.contains("--layers"),
@@ -407,7 +394,11 @@ async fn assign_range_explicit_origin_bypasses_live_lookup() {
         .await
         .unwrap()
         .into_inner();
-    assert!(resp.ok, "explicit-origin assign should succeed: {}", resp.message);
+    assert!(
+        resp.ok,
+        "explicit-origin assign should succeed: {}",
+        resp.message
+    );
 
     let observed = tokio::time::timeout(Duration::from_secs(2), spare_inbound.next())
         .await

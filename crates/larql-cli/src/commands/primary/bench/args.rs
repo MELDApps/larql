@@ -92,6 +92,42 @@ pub struct BenchArgs {
     #[arg(long)]
     pub bench_grid: bool,
 
+    /// LAN preregistration matrix (Exp 41): take a JSON config that
+    /// lists named `larql bench …` invocations, run each one with the
+    /// configured repeats, and emit a JSONL manifest + summary table.
+    /// See `experiments/41_residual_transport_grid/config.example.json`
+    /// for the schema. When set, all other bench backends are skipped.
+    #[arg(long, value_name = "PATH")]
+    pub bench_grid_lan: Option<std::path::PathBuf>,
+
+    /// Where to write the grid-lan JSONL manifest + per-run stdout/stderr
+    /// captures. Defaults to `<config-dir>/results/`.
+    #[arg(long, value_name = "DIR")]
+    pub grid_lan_out: Option<std::path::PathBuf>,
+
+    /// Restrict the grid-lan matrix to the named run IDs (repeatable).
+    /// Mirrors `run.py --only`.
+    #[arg(long = "grid-lan-only", value_name = "ID")]
+    pub grid_lan_only: Vec<String>,
+
+    /// Include runs marked `enabled: false` in the JSON config.
+    #[arg(long)]
+    pub grid_lan_include_disabled: bool,
+
+    /// Dry-run the grid-lan matrix: print the substituted command for
+    /// each run but don't spawn anything.
+    #[arg(long)]
+    pub grid_lan_dry_run: bool,
+
+    /// Exp 41 retry rule: when the per-row CoV across repeats exceeds
+    /// this fraction, run up to `--grid-lan-extra-repeats` more times.
+    #[arg(long, default_value = "0.15", value_name = "FRAC")]
+    pub grid_lan_cov_threshold: f64,
+
+    /// Maximum extra repeats issued when the CoV gate trips.
+    #[arg(long, default_value = "2", value_name = "N")]
+    pub grid_lan_extra_repeats: u32,
+
     /// Simulate N concurrent clients. Each runs the full bench independently;
     /// reports aggregate tok/s and per-client p99.
     #[arg(long, default_value = "1", value_name = "N")]
@@ -109,4 +145,11 @@ pub struct BenchArgs {
     /// Verbose load / warmup logging.
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// CPU thread count for the rayon pool. `0` (default) auto-selects:
+    /// 8 on M3-class Apple silicon (best on memory-channel-saturated
+    /// Q4_K matvec), otherwise rayon's default. Honors
+    /// `RAYON_NUM_THREADS` if set in the environment.
+    #[arg(long, default_value = "0", value_name = "N")]
+    pub threads: usize,
 }

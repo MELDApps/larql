@@ -4,39 +4,71 @@ Pluggable KV-cache engines for `larql-inference`. Each engine implements the
 full prefill + autoregressive decode loop but manages persistent inference
 state differently — trading memory, accuracy, and speed.
 
+The `KvEngine` trait + `EngineInfo` + `DecodeStageSummary` live in
+`larql-inference::kv_engine`; this crate re-exports them so
+`larql_kv::KvEngine` continues to work as the public surface. The trait
+lives upstream so `larql-inference`'s decode dispatch
+(`generate_with_engine`) can reference it without a circular dep. See
+[`crates/larql-inference/docs/specs/kv-engine-unification.md`](../larql-inference/docs/specs/kv-engine-unification.md)
+for the dep-graph rationale.
+
 ## Engine ladder
 
-Numbers measured on Gemma 3 4B @ 370K-token corpora, M3 Max, Metal Q4K.
-See [`PERFORMANCE.md`](PERFORMANCE.md) for the full audit.
+Six engines: `Standard` and `NoCache` wrap today's production behaviour;
+the other four are the research engines that trade accuracy for memory
+or speed.
 
-| Engine | Speed (tok/s) | KV memory | Compression | Accuracy |
-|---|---|---|---|---|
-| [`markov_residual`](src/engines/markov_residual) | ~95 | ~171 MB | ~287× | exact (KL = 0.0) |
-| [`unlimited_context`](src/engines/unlimited_context) | ~94 | ~193 MB | ~254× | exact within window |
-| [`turbo_quant`](src/engines/turbo_quant) | ~95 | ~12.7 GB | ~4× | cos ≈ 0.991 |
-| [`apollo`](src/engines/apollo) | ~8× faster with boundaries | ~11 MB | ~4,414× | task accuracy |
+| Engine | Mechanism | KV memory | Accuracy |
+|---|---|---|---|
+| [`standard`](src/engines/standard.rs) | Production K/V tensor cache, `window=None` = unbounded, `Some(N)` = sliding window | O(layers × seq × kv_dim × 4B) | exact — the reference |
+| [`no_cache`](src/engines/no_cache.rs) | No K/V; full re-forward per step (O(N²)) | O(seq) token IDs only | exact — correctness fallback |
+| [`markov_residual`](src/engines/markov_residual) | Residual-stream replacement, K/V recomputed | ~171 MB on Gemma 3 4B | exact (KL = 0.0) under contract |
+| [`unlimited_context`](src/engines/unlimited_context) | Per-window K/V checkpoints | ~193 MB | exact within window |
+| [`turbo_quant`](src/engines/turbo_quant) | WHT + Lloyd-Max 3/4-bit codec | ~12.7 GB on 370K-token corpus | cos ≈ 0.991 |
+| [`apollo`](src/engines/apollo) | Boundary store + residual injection | ~11 MB on 370K-token corpus | task accuracy (first-token factual) |
 
-Reference for "compression" is full f16 KV at 49 GB on the same corpus.
+Speed numbers (Gemma 3 4B, M3 Max, Metal Q4K) and compression ratios for
+the research engines live in [`PERFORMANCE.md`](PERFORMANCE.md). Reference
+for "compression" is full f16 KV at 49 GB on the same corpus.
+
+### Standard vs MarkovResidual
+
+`Standard` (this crate's wrapper over the production K/V cache) and
+`MarkovResidual` (residual-stream replacement) are **different
+mechanisms** that happen to produce bit-identical output on supported
+architectures. Don't conflate them — the CLI's historical `--kv-cache
+markov-bounded` flag maps to `Standard { window_size: Some(N) }`, **not**
+`MarkovResidual`. Use the spec's table in §5 when in doubt.
 
 ## Usage
 
 ```rust
 use larql_kv::{EngineKind, KvEngine};
 use larql_compute::default_backend;
+use larql_inference::ffn::WeightFfn;
 
 // Parse a CLI engine spec.
-let kind = EngineKind::from_name("markov-rs:window=512").unwrap();
+let kind = EngineKind::from_name("standard:window=512").unwrap();
 
 // Build an engine bound to a compute backend.
 let mut engine: Box<dyn KvEngine> = kind.build(default_backend());
 
-// Prefill, then decode autoregressively.
-let hidden = engine.prefill(&weights, &prompt_tokens).unwrap();
-for _ in 0..n {
-    let hidden = engine.decode_step(&weights, last_token).unwrap();
-    let logits = larql_inference::forward::hidden_to_raw_logits(&weights, &hidden);
-    // sample, append, loop
-}
+// FFN router — `WeightFfn` reads weights locally; pass any FfnBackend
+// impl (e.g. `RemoteWalkBackend` for remote-FFN dispatch).
+let ffn = WeightFfn { weights: &weights };
+
+// Prefill, then decode autoregressively. Prefer the
+// `larql_inference::forward::generate_with_engine` helper, which drives
+// the same prefill + sample + decode loop legacy callers use.
+let generated = larql_inference::forward::generate_with_engine(
+    engine.as_mut(),
+    &weights,
+    &tokenizer,
+    &ffn,
+    &prompt_tokens,
+    max_tokens,
+    |id, tok| { /* on-token callback */ },
+);
 ```
 
 The engines also expose Q4K-quantised entry points
@@ -49,33 +81,48 @@ available, falling back to the f32 path otherwise.
 The CLI parses engine specs as `name` or `name:key=value[,key=value]`:
 
 ```text
-markov-rs                                 # default
+standard                                  # production K/V cache, unbounded (default)
+standard:window=1024                      # sliding-window K/V
+no-cache                                  # full re-forward per step (O(N²)), debug only
+markov-rs                                 # residual-stream replacement
 markov-rs:window=1024
 unlimited-context:window=256
-turbo-quant:bits=3      # alias: tq3
-turbo-quant             # bits=4 default; alias: tq4
+turbo-quant:bits=3        # alias: tq3
+turbo-quant               # bits=4 default; alias: tq4
 apollo:layer=25,coef=8.0,top_k=12
 ```
 
-All four engines are benched via `larql bench <model> --engine <spec>`.
+Legacy aliases for `standard`: `full`, `fp32`. Legacy aliases for
+windowed standard: `markov-bounded`, `bounded`, `sliding`. Legacy aliases
+for `no-cache`: `none`, `off`.
+
+All engines are reachable via `larql bench <model> --engine <spec>`. As
+of the unification migration, `larql run` / `larql walk` / `larql-server`
+will also accept `--engine` (currently behind `LARQL_KV_ENGINE_DISPATCH=1`
+for parity-testing; see the unification spec for the rollout plan).
 
 ## Crate layout
 
 ```
 larql-kv/
 ├── src/
-│   ├── lib.rs          — KvEngine trait, EngineKind, EngineInfo, dispatch
+│   ├── lib.rs          — EngineKind dispatch + re-exports of the trait surface
 │   ├── accuracy.rs     — cosine, MSE, KL, JS, compare_hidden helpers
 │   ├── profiler.rs     — per-stage decode timing accumulators
 │   └── engines/
-│       ├── apollo/             — boundary-residual injection, ~4,000× compression
-│       ├── markov_residual/    — residual-stream KV replacement, KL = 0
-│       ├── turbo_quant/        — WHT + Lloyd-Max K/V codec (3- or 4-bit)
-│       └── unlimited_context/  — windowed re-prefill from checkpoints
+│       ├── standard.rs           — production K/V tensor cache (default)
+│       ├── no_cache.rs           — full re-forward per step (debug fallback)
+│       ├── apollo/               — boundary-residual injection, ~4,000× compression
+│       ├── markov_residual/      — residual-stream KV replacement, KL = 0
+│       ├── turbo_quant/          — WHT + Lloyd-Max K/V codec (3- or 4-bit)
+│       └── unlimited_context/    — windowed re-prefill from checkpoints
 ├── benches/            — criterion microbenchmarks
 ├── examples/           — end-to-end demos on synthetic test_utils
 └── coverage-policy.json — per-file ≥90% line-coverage policy
 ```
+
+The `KvEngine` trait itself lives in
+[`larql-inference/src/kv_engine.rs`](../larql-inference/src/kv_engine.rs).
 
 ## Architecture notes
 

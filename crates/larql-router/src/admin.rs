@@ -51,7 +51,7 @@ pub fn format_status(resp: &StatusResponse, only_model: Option<&str>) -> Vec<Str
         let total_layers = model
             .shards
             .iter()
-            .map(|s| (s.layer_end - s.layer_start + 1) as u32)
+            .map(|s| s.layer_end - s.layer_start + 1)
             .sum::<u32>();
         let coverage_pct = if model.num_layers > 0 {
             (total_layers as f64 / model.num_layers as f64) * 100.0
@@ -75,7 +75,10 @@ pub fn format_status(resp: &StatusResponse, only_model: Option<&str>) -> Vec<Str
             ));
         }
         for gap in &model.gaps {
-            out.push(format!("  GAP layers {}-{}", gap.layer_start, gap.layer_end));
+            out.push(format!(
+                "  GAP layers {}-{}",
+                gap.layer_start, gap.layer_end
+            ));
         }
     }
 
@@ -134,10 +137,7 @@ pub async fn admin_status(router_url: &str) -> Result<Vec<String>, AdminError> {
 }
 
 /// `larql-router gaps` — fetch live status and render only the gap report.
-pub async fn admin_gaps(
-    router_url: &str,
-    model: Option<&str>,
-) -> Result<Vec<String>, AdminError> {
+pub async fn admin_gaps(router_url: &str, model: Option<&str>) -> Result<Vec<String>, AdminError> {
     let mut client = GridServiceClient::connect(router_url.to_string()).await?;
     let resp = client.status(StatusRequest {}).await?.into_inner();
     Ok(format_gaps(&resp, model))

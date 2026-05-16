@@ -52,7 +52,9 @@ pub fn group_layers_by_url(layer_urls: &HashMap<usize, String>) -> HashMap<Strin
 /// sees exactly one of the two.
 pub fn build_subrequest_body(template: &Value, shard_layers: &[usize]) -> Value {
     let mut body = template.clone();
-    let obj = body.as_object_mut().expect("template must be a JSON object");
+    let obj = body
+        .as_object_mut()
+        .expect("template must be a JSON object");
     if shard_layers.len() == 1 {
         obj.insert("layer".into(), Value::from(shard_layers[0]));
         obj.remove("layers");
@@ -263,7 +265,11 @@ mod tests {
     #[test]
     fn unique_candidates_dedup_within_grid_and_against_static() {
         let shards = parse_shards("0-1=http://a").unwrap();
-        let grid = vec!["http://a".to_string(), "http://a".to_string(), "http://b".to_string()];
+        let grid = vec![
+            "http://a".to_string(),
+            "http://a".to_string(),
+            "http://b".to_string(),
+        ];
         let out = unique_candidate_urls(grid, &shards);
         assert_eq!(out, vec!["http://a", "http://b"]);
     }

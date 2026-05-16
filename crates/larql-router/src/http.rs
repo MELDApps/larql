@@ -313,7 +313,9 @@ mod tests {
     #[test]
     fn is_binary_content_type_recognises_marker_prefix() {
         assert!(is_binary_content_type(BINARY_CT));
-        assert!(is_binary_content_type("application/x-larql-ffn; charset=utf-8"));
+        assert!(is_binary_content_type(
+            "application/x-larql-ffn; charset=utf-8"
+        ));
         assert!(!is_binary_content_type("application/json"));
         assert!(!is_binary_content_type(""));
     }

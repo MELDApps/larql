@@ -813,10 +813,13 @@ pub async fn handle_walk_ffn(
 ) -> Result<Response, ServerError> {
     state.bump_requests();
 
-    // Track active requests for GT6 drain.
+    // Track active requests for GT6 drain, and bump the per-shard
+    // cumulative counter that the grid announce loop diffs to emit
+    // HeartbeatMsg.req_per_sec.
     let _rif_guard = state.models.first().map(|m| {
         use std::sync::atomic::Ordering;
         m.requests_in_flight.fetch_add(1, Ordering::Relaxed);
+        m.requests_total.fetch_add(1, Ordering::Relaxed);
         RifGuard(m.requests_in_flight.clone())
     });
 

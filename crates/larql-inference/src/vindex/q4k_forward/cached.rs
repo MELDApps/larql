@@ -16,6 +16,10 @@
 //! `predict_q4k_hidden` path — the caller decides via
 //! [`supports_cached_decode`].
 
+use larql_compute::cpu::ops::q4k_q8k_dot::{
+    q4k_q8k_gate_up_into, q4k_q8k_matvec_into, q6k_q8k_matvec_into, quantize_x_to_q8k_into,
+    Q8KActivation,
+};
 use larql_compute::ComputeBackend;
 use larql_models::ModelWeights;
 use larql_vindex::VectorIndex;
@@ -90,8 +94,8 @@ pub fn predict_q4k_prefill(
 
     for layer in 0..num_layers {
         let t0 = std::time::Instant::now();
-        let inserted = insert_q4k_layer_tensors(weights, index, layer)
-            .unwrap_or_else(|err| panic!("{err}"));
+        let inserted =
+            insert_q4k_layer_tensors(weights, index, layer).unwrap_or_else(|err| panic!("{err}"));
         timings.dequant_ms += t0.elapsed().as_secs_f64() * 1000.0;
 
         // Attention with K/V capture. Backend stays None — we want the
@@ -147,8 +151,8 @@ pub fn predict_q4k_decode_step(
 
     for layer in 0..num_layers {
         let t0 = std::time::Instant::now();
-        let inserted = insert_q4k_layer_tensors(weights, index, layer)
-            .unwrap_or_else(|err| panic!("{err}"));
+        let inserted =
+            insert_q4k_layer_tensors(weights, index, layer).unwrap_or_else(|err| panic!("{err}"));
         timings.dequant_ms += t0.elapsed().as_secs_f64() * 1000.0;
 
         let kv_entry = cache[layer].as_ref();
@@ -213,6 +217,67 @@ fn matvec_quant(
         "Q6_K" => backend.q6k_matvec(bytes, x, rows, cols),
         _ => None,
     }
+}
+
+/// Format-aware Q*K × Q8_K matvec used by the production decode path.
+/// Uses NEON `sdot` (Q4_K) or `vmlal_s8` (Q6_K) under the hood — ~2-3×
+/// the f32-FMA throughput of `matvec_quant`. Returns `None` for any
+/// unsupported format (caller falls through to dequant).
+fn matvec_q4k_or_q6k_q8k(
+    bytes: &[u8],
+    format: &str,
+    x_q8k: &Q8KActivation,
+    rows: usize,
+    cols: usize,
+) -> Option<Vec<f32>> {
+    if rows == 0 || cols == 0 {
+        return Some(vec![0.0f32; rows]);
+    }
+    const ELEMS_PER_BLOCK: usize = 256;
+    if !cols.is_multiple_of(ELEMS_PER_BLOCK) {
+        return None;
+    }
+    let bytes_per_row = match format {
+        "Q4_K" => (cols / ELEMS_PER_BLOCK) * 144,
+        "Q6_K" => (cols / ELEMS_PER_BLOCK) * 210,
+        _ => return None,
+    };
+    if bytes.len() < rows * bytes_per_row {
+        return None;
+    }
+
+    // `q4k_q8k_matvec_into` (larql-compute) is a single-threaded
+    // per-row loop. Wrap it with `par_chunks_mut(CHUNK_ROWS)` here so
+    // every Q4_K/Q6_K × Q8_K matvec on the decode path scales across
+    // the 11 perf cores on M3 Max — matching the rayon strategy of
+    // `q4k_matvec_into` in `q4_common.rs`. Without this, decode runs
+    // single-threaded and the sdot path actually regresses vs the
+    // (rayon-parallel) f32 path despite each row being faster.
+    use rayon::prelude::*;
+    const CHUNK_ROWS: usize = 32;
+    let mut out = vec![0.0f32; rows];
+    let w_ref = bytes;
+    out.par_chunks_mut(CHUNK_ROWS)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let row_start = chunk_idx * CHUNK_ROWS;
+            let chunk_len = chunk.len().min(rows.saturating_sub(row_start));
+            if chunk_len == 0 {
+                return;
+            }
+            let w_chunk =
+                &w_ref[row_start * bytes_per_row..(row_start + chunk_len) * bytes_per_row];
+            match format {
+                "Q4_K" => {
+                    q4k_q8k_matvec_into(&mut chunk[..chunk_len], x_q8k, w_chunk, chunk_len, cols)
+                }
+                "Q6_K" => {
+                    q6k_q8k_matvec_into(&mut chunk[..chunk_len], x_q8k, w_chunk, chunk_len, cols)
+                }
+                _ => {}
+            }
+        });
+    Some(out)
 }
 
 /// True when every Q/K/V/O + gate/up/down slice for `layer` is in a
@@ -297,7 +362,12 @@ fn run_attn_decode_step_q4k_direct(
     };
     let norm_offset = arch.norm_weight_offset();
 
-    let h_norm = apply_norm(weights, h_new, &arch.input_layernorm_key(layer), norm_offset);
+    let h_norm = apply_norm(
+        weights,
+        h_new,
+        &arch.input_layernorm_key(layer),
+        norm_offset,
+    );
     let h_norm_row: &[f32] = h_norm.row(0).to_slice().or_else(|| h_norm.as_slice())?;
 
     let attn = index.attn_q4k_layer_data(layer)?;
@@ -306,7 +376,14 @@ fn run_attn_decode_step_q4k_direct(
     let (v_bytes, v_fmt) = attn[2];
     let (o_bytes, o_fmt) = attn[3];
 
-    let q_vec = matvec_quant(backend, q_bytes, q_fmt, h_norm_row, q_dim, hidden)?;
+    // Q8_K-quantise `h_norm` once and reuse for Q / K / V projections.
+    // sdot int8 dot is ~2-3× the f32 FMA throughput of the
+    // `q4k_matvec_into` path; the quantisation step itself is O(hidden)
+    // and amortises across the three projections (and O after attn).
+    let mut h_norm_q8k = Q8KActivation::with_capacity(hidden);
+    quantize_x_to_q8k_into(&mut h_norm_q8k, h_norm_row);
+
+    let q_vec = matvec_q4k_or_q6k_q8k(q_bytes, q_fmt, &h_norm_q8k, q_dim, hidden)?;
     let mut q_full = vec_to_2d_row(q_vec);
     if let Some(bias) = arch
         .attn_q_bias_key(layer)
@@ -339,8 +416,8 @@ fn run_attn_decode_step_q4k_direct(
         abs_position,
     );
 
-    let k_vec = matvec_quant(backend, k_bytes, k_fmt, h_norm_row, kv_dim, hidden)?;
-    let v_vec = matvec_quant(backend, v_bytes, v_fmt, h_norm_row, kv_dim, hidden)?;
+    let k_vec = matvec_q4k_or_q6k_q8k(k_bytes, k_fmt, &h_norm_q8k, kv_dim, hidden)?;
+    let v_vec = matvec_q4k_or_q6k_q8k(v_bytes, v_fmt, &h_norm_q8k, kv_dim, hidden)?;
     let mut k_full_new = vec_to_2d_row(k_vec);
     let mut v_full_new = vec_to_2d_row(v_vec);
     if let Some(bias) = arch
@@ -402,7 +479,11 @@ fn run_attn_decode_step_q4k_direct(
     );
     let attn_out_row: &[f32] = attn_out.row(0).to_slice().or_else(|| attn_out.as_slice())?;
 
-    let o_vec = matvec_quant(backend, o_bytes, o_fmt, attn_out_row, hidden, q_dim)?;
+    // Re-quantise the attention output for the O projection. Different
+    // input from Q/K/V (attn_out vs h_norm), so we need a fresh Q8_K.
+    let mut attn_out_q8k = Q8KActivation::with_capacity(q_dim);
+    quantize_x_to_q8k_into(&mut attn_out_q8k, attn_out_row);
+    let o_vec = matvec_q4k_or_q6k_q8k(o_bytes, o_fmt, &attn_out_q8k, hidden, q_dim)?;
     let mut attn_projected = vec_to_2d_row(o_vec);
     if let Some(bias) = arch
         .attn_o_bias_key(layer)
@@ -475,8 +556,20 @@ fn run_ffn_decode_step_q4k_direct(
         return None;
     }
 
-    let gate_vec = matvec_quant(backend, gate_bytes, gate_fmt, h_in_row, intermediate, hidden)?;
-    let up_vec = matvec_quant(backend, up_bytes, up_fmt, h_in_row, intermediate, hidden)?;
+    // Q8_K-quantise `h_in` once and feed it to both gate and up via the
+    // sdot-based fused matvec. This is the int8-dot Q4_K × Q8_K path
+    // that closes the bandwidth gap to llama.cpp on M3 Max.
+    let mut h_in_q8k = Q8KActivation::with_capacity(hidden);
+    quantize_x_to_q8k_into(&mut h_in_q8k, h_in_row);
+
+    // Two separate matvecs, each rayon-parallel inside
+    // `matvec_q4k_or_q6k_q8k`. The "fused gate+up" variant in
+    // `larql-compute` (`q4k_q8k_gate_up_into`) is single-threaded;
+    // the input vector (10 KB) stays in L1 across two sequential
+    // calls anyway, so we don't need explicit fusion to keep `x`
+    // hot. Splitting lets both matvecs run row-parallel.
+    let gate_vec = matvec_q4k_or_q6k_q8k(gate_bytes, gate_fmt, &h_in_q8k, intermediate, hidden)?;
+    let up_vec = matvec_q4k_or_q6k_q8k(up_bytes, up_fmt, &h_in_q8k, intermediate, hidden)?;
 
     // Element-wise activation: activation(gate) * up.
     let mut activated = vec![0.0f32; intermediate];
@@ -502,7 +595,12 @@ fn run_ffn_decode_step_q4k_direct(
     }
 
     // down projection: out = activated @ W_down.T → [hidden].
-    let down_vec = matvec_quant(backend, down_bytes, down_fmt, &activated, hidden, intermediate)?;
+    // Re-quantise the post-activation vector (`intermediate`-wide) for
+    // the down matvec — different input from gate/up.
+    let mut activated_q8k = Q8KActivation::with_capacity(intermediate);
+    quantize_x_to_q8k_into(&mut activated_q8k, &activated);
+    let down_vec =
+        matvec_q4k_or_q6k_q8k(down_bytes, down_fmt, &activated_q8k, hidden, intermediate)?;
     let mut out = vec_to_2d_row(down_vec);
     if let Some(bias) = arch
         .ffn_down_bias_key(layer)

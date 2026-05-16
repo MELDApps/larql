@@ -214,6 +214,15 @@ struct Cli {
     #[arg(long, default_value = "2.0")]
     rebalance_threshold: f32,
 
+    /// Hot-shard replication: per-replica request rate (req/s) above
+    /// which a shard is treated as effectively under-replicated. When
+    /// a shard's max req_per_sec across replicas exceeds this value,
+    /// the rebalancer pulls one extra spare from the available pool;
+    /// when the rate subsides the extra replica is dropped on the next
+    /// over-replication tick. Unset (default) disables the check.
+    #[arg(long)]
+    hot_shard_rps: Option<f32>,
+
     /// Phase 4: number of replicas to maintain per shard range.
     /// 1 = no replication (default). >1 enables auto-replication: when fewer
     /// than N servers cover a range, the router pulls from the available
@@ -261,7 +270,6 @@ struct Cli {
 // `larql_router::http` so they can be exercised by integration tests
 // without spawning the binary.
 use larql_router::http::{build_router, AppState};
-
 
 // ── Main ───────────────────────────────────────────────────────────────────────
 
@@ -341,10 +349,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     info!("larql-router v{}", env!("CARGO_PKG_VERSION"));
 
-    if let Err(msg) = larql_router::cli_helpers::validate_daemon_inputs(
-        cli.shards.as_deref(),
-        cli.grid_port,
-    ) {
+    if let Err(msg) =
+        larql_router::cli_helpers::validate_daemon_inputs(cli.shards.as_deref(), cli.grid_port)
+    {
         eprintln!("error: {msg}");
         std::process::exit(1);
     }
@@ -390,7 +397,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // the first under-/over-replication check sees the right target.
         state.write().await.set_target_replicas(cli.target_replicas);
         if cli.target_replicas > 1 {
-            info!(target_replicas = cli.target_replicas, "Replication: enabled");
+            info!(
+                target_replicas = cli.target_replicas,
+                "Replication: enabled"
+            );
         }
 
         let svc = GridServiceServer::new(GridServiceImpl::new_with_key(
@@ -413,11 +423,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // is set. Same gRPC service implementation, different transport.
         #[cfg(feature = "quic")]
         if let Some(quic_port) = cli.quic_port {
-            spawn_quic_listener(
-                &cli,
-                state.clone(),
-                quic_port,
-            )?;
+            spawn_quic_listener(&cli, state.clone(), quic_port)?;
         }
 
         // GT6: spawn dynamic rebalancer (disabled when interval == 0).
@@ -425,10 +431,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let rebalance_cfg = rebalancer::RebalancerConfig::from_cli(
                 cli.rebalance_interval,
                 cli.rebalance_threshold,
-            );
+            )
+            .with_hot_shard_threshold(cli.hot_shard_rps);
             info!(
                 interval_s = cli.rebalance_interval,
                 threshold = cli.rebalance_threshold,
+                hot_shard_rps = ?cli.hot_shard_rps,
                 "Rebalancer: enabled"
             );
             rebalancer::spawn(state.clone(), rebalance_cfg);
@@ -450,4 +458,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     Ok(())
 }
-

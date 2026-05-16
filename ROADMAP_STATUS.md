@@ -4,7 +4,11 @@ Canonical rollup for the next execution slice. Keep the detailed design in
 `ROADMAP.md` and crate-local roadmaps; use this file to answer "what is active
 now?" without rereading every crate document.
 
-Last updated: 2026-05-15
+Last updated: 2026-05-16
+
+## Recently shipped (delta since last update)
+
+- **Cross-engine forward-pass correctness gate** (2026-05-16): `larql shannon verify` CLI + multi-arch sweep `scripts/diagnose_models.py` + CI workflow `.github/workflows/shannon-verify.yml`. Four config-loading bugs surfaced and fixed in `larql-models` (rms_norm_eps not parsed; Gemma 3 per-layer-type rope_scaling missing; llama3 rope_scaling missing; StarCoder2 norm_epsilon alias). 7/9 archs in the sweep PASS at <0.5% bits/char vs HF F32 with no env-var overrides. See [`docs/diagnoses/shannon-cross-engine-divergence.md`](docs/diagnoses/shannon-cross-engine-divergence.md).
 
 ## Active Sequence
 

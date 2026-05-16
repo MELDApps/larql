@@ -6,11 +6,33 @@ use ndarray::Array2;
 /// Callers should prefer passing `arch.norm_eps()` explicitly.
 pub const DEFAULT_EPS: f64 = 1e-6;
 
-/// RMS norm with configurable weight offset and epsilon.
-/// offset=1.0 for Gemma 2/3 (weight = 1 + learned), offset=0.0 for most layers.
-/// Uses f64 accumulation for the sum-of-squares to avoid order-dependent rounding.
+/// RMS norm with the legacy default epsilon ([`DEFAULT_EPS`] = 1e-6).
+///
+/// Prefer [`rms_norm_for_arch`] when an architecture handle is available —
+/// it reads `arch.norm_eps()` from the parsed config (Mistral / Llama 3 /
+/// Gemma 3 ship `rms_norm_eps = 1e-5`, not 1e-6), with the
+/// `LARQL_NORM_EPS_OVERRIDE` env var taking precedence for diagnostic
+/// bisection. This bare version is for tests and for code paths that
+/// genuinely have no model context.
 pub fn rms_norm(x: &Array2<f32>, weight: Option<&Vec<f32>>, offset: f32) -> Array2<f32> {
     rms_norm_eps(x, weight, offset, DEFAULT_EPS)
+}
+
+/// RMS norm with eps sourced from `arch.norm_eps()` (parsed from config.json)
+/// or overridden by `LARQL_NORM_EPS_OVERRIDE`. The arch-driven path is the
+/// permanent fix for bug 2 in
+/// `docs/diagnoses/shannon-cross-engine-divergence.md`; the env var stays
+/// as a diagnostic instrument.
+pub fn rms_norm_for_arch(
+    x: &Array2<f32>,
+    weight: Option<&Vec<f32>>,
+    offset: f32,
+    arch: &dyn larql_models::ModelArchitecture,
+) -> Array2<f32> {
+    let eps = crate::forward_overrides::norm_eps_override()
+        .map(|v| v as f64)
+        .unwrap_or_else(|| arch.norm_eps() as f64);
+    rms_norm_eps(x, weight, offset, eps)
 }
 
 /// RMS norm with explicit epsilon.
@@ -40,12 +62,31 @@ pub fn rms_norm_eps(
 
 /// LayerNorm: (x - mean) / std * weight + bias.
 /// Uses f64 accumulation for mean/variance.
+///
+/// Prefer [`layer_norm_for_arch`] when an architecture handle is available
+/// — it reads `arch.norm_eps()` from the parsed config (StarCoder2 ships
+/// `norm_epsilon = 1e-5`, GPT-2 ships `layer_norm_epsilon = 1e-5`).
 pub fn layer_norm(
     x: &Array2<f32>,
     weight: Option<&Vec<f32>>,
     bias: Option<&Vec<f32>>,
 ) -> Array2<f32> {
     layer_norm_eps(x, weight, bias, DEFAULT_EPS)
+}
+
+/// LayerNorm with eps sourced from `arch.norm_eps()` (parsed from
+/// `norm_epsilon` / `layer_norm_eps` / `layer_norm_epsilon`), overridden
+/// by `LARQL_NORM_EPS_OVERRIDE`. Companion to [`rms_norm_for_arch`].
+pub fn layer_norm_for_arch(
+    x: &Array2<f32>,
+    weight: Option<&Vec<f32>>,
+    bias: Option<&Vec<f32>>,
+    arch: &dyn larql_models::ModelArchitecture,
+) -> Array2<f32> {
+    let eps = crate::forward_overrides::norm_eps_override()
+        .map(|v| v as f64)
+        .unwrap_or_else(|| arch.norm_eps() as f64);
+    layer_norm_eps(x, weight, bias, eps)
 }
 
 /// LayerNorm with explicit epsilon.

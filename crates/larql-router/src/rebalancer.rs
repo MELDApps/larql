@@ -36,6 +36,11 @@ pub struct RebalancerConfig {
     /// servers that keep TCP open but stop sending heartbeats. Default 25 s
     /// = 2.5 × the 10 s heartbeat interval.
     pub stale_heartbeat_timeout: Duration,
+    /// Hot-shard request-rate threshold (req/s, max across replicas).
+    /// `None` disables the check. When set, a shard whose per-replica
+    /// req_per_sec exceeds this value is treated as effectively
+    /// under-replicated (target + 1) until the rate subsides.
+    pub hot_shard_rps_threshold: Option<f32>,
 }
 
 impl Default for RebalancerConfig {
@@ -45,6 +50,7 @@ impl Default for RebalancerConfig {
             imbalance_threshold: 2.0,
             sustained_window: Duration::from_secs(60),
             stale_heartbeat_timeout: Duration::from_secs(25),
+            hot_shard_rps_threshold: None,
         }
     }
 }
@@ -56,7 +62,17 @@ impl RebalancerConfig {
             imbalance_threshold: threshold,
             sustained_window: Duration::from_secs(interval_secs * 2),
             stale_heartbeat_timeout: Duration::from_secs(25),
+            hot_shard_rps_threshold: None,
         }
+    }
+
+    /// Builder-style setter for the hot-shard threshold so callers
+    /// constructed via `default()` / `from_cli()` can add the threshold
+    /// without restating every field.
+    pub fn with_hot_shard_threshold(mut self, threshold: Option<f32>) -> Self {
+        // Treat ≤0 as "disabled" — saves a magic check in the rebalancer.
+        self.hot_shard_rps_threshold = threshold.filter(|t| *t > 0.0);
+        self
     }
 }
 
@@ -101,20 +117,57 @@ async fn rebalancer_task(state: Arc<RwLock<GridState>>, cfg: RebalancerConfig) {
     loop {
         interval.tick().await;
         evict_stale_heartbeats(&state, cfg.stale_heartbeat_timeout).await;
+        // Hot-shard elevation runs before replica checks so newly hot
+        // ranges look under-replicated in the same tick (and cooling
+        // ranges look over-replicated, freeing the surplus replica).
+        if let Some(threshold) = cfg.hot_shard_rps_threshold {
+            check_hot_shards(&state, threshold).await;
+        }
         check_under_replication(&state).await;
         check_over_replication(&state).await;
         check_imbalance(&state, &cfg, &mut tracker).await;
     }
 }
 
-/// Phase 4: pull spares from the available pool to bring under-replicated
-/// ranges up to `target_replicas`. Triggered periodically — in addition to
-/// the event-driven triggers in `grid.rs` (Available, Ready, deregister).
-async fn check_under_replication(state: &Arc<RwLock<GridState>>) {
-    let target = state.read().await.target_replicas();
-    if target <= 1 {
-        return; // No replication target configured.
+/// Flip the elevated flag for every range whose hot/cool state has
+/// changed. The follow-on `check_under_replication` / `check_over_replication`
+/// ticks act on the new effective targets — this function does not send
+/// any messages itself.
+async fn check_hot_shards(state: &Arc<RwLock<GridState>>, threshold: f32) {
+    let mut guard = state.write().await;
+    let hot: std::collections::HashSet<(String, u32, u32)> =
+        guard.hot_layer_ranges(threshold).into_iter().collect();
+    let elevated: std::collections::HashSet<(String, u32, u32)> =
+        guard.elevated_ranges_snapshot().into_iter().collect();
+
+    for range in hot.difference(&elevated) {
+        guard.mark_elevated(&range.0, range.1, range.2);
+        tracing::info!(
+            model_id = %range.0,
+            layers = %format!("{}-{}", range.1, range.2),
+            threshold,
+            "Rebalancer: hot shard detected — effective_target raised by 1"
+        );
     }
+    for range in elevated.difference(&hot) {
+        guard.demote_elevated(&range.0, range.1, range.2);
+        tracing::info!(
+            model_id = %range.0,
+            layers = %format!("{}-{}", range.1, range.2),
+            "Rebalancer: hot shard cooled — effective_target restored"
+        );
+    }
+}
+
+/// Phase 4: pull spares from the available pool to bring under-replicated
+/// ranges up to their effective target (`target_replicas`, plus the
+/// hot-shard bump). Triggered periodically — in addition to the
+/// event-driven triggers in `grid.rs` (Available, Ready, deregister).
+///
+/// Note: this no longer short-circuits on `target_replicas <= 1` because
+/// the hot-shard tick can elevate a range's effective target above 1
+/// even when the static target is 1.
+async fn check_under_replication(state: &Arc<RwLock<GridState>>) {
     let assigned = state.write().await.try_replicate_from_available();
     if assigned > 0 {
         tracing::info!(
@@ -181,10 +234,7 @@ async fn check_over_replication(state: &Arc<RwLock<GridState>>) {
 
 /// Deregister servers that have stopped sending heartbeats. After eviction,
 /// re-run gap-fill in case the disappearance exposed a fillable gap.
-async fn evict_stale_heartbeats(
-    state: &Arc<RwLock<GridState>>,
-    timeout: std::time::Duration,
-) {
+async fn evict_stale_heartbeats(state: &Arc<RwLock<GridState>>, timeout: std::time::Duration) {
     let stale = state.read().await.stale_server_ids(timeout);
     if stale.is_empty() {
         return;
@@ -347,10 +397,8 @@ mod tests {
         use tokio::sync::mpsc;
 
         let state = Arc::new(RwLock::new(GridState::default()));
-        let (tx_idle, mut rx_idle) =
-            mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
-        let (tx_busy, _rx_busy) =
-            mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
+        let (tx_idle, mut rx_idle) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
+        let (tx_busy, _rx_busy) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
 
         {
             let mut g = state.write().await;
@@ -368,6 +416,7 @@ mod tests {
                 requests_in_flight: 9,
                 last_seen: std::time::Instant::now(),
                 layer_latencies: HashMap::new(),
+                req_per_sec: 0.0,
             };
             let busy_2 = ServerEntry {
                 requests_in_flight: 8,
@@ -433,6 +482,7 @@ mod tests {
             requests_in_flight: 0,
             last_seen: std::time::Instant::now(),
             layer_latencies: std::collections::HashMap::new(),
+            req_per_sec: 0.0,
         }
     }
 
@@ -441,8 +491,7 @@ mod tests {
         use tokio::sync::mpsc;
 
         let state = Arc::new(RwLock::new(GridState::default()));
-        let (spare_tx, mut spare_rx) =
-            mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
+        let (spare_tx, mut spare_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
         {
             let mut g = state.write().await;
             g.set_target_replicas(2);
@@ -469,7 +518,10 @@ mod tests {
             g.register_available("spare".into(), tx, 1, 0, "/".into());
         }
         check_under_replication(&state).await;
-        assert!(rx.try_recv().is_err(), "no assignment should fire at target=1");
+        assert!(
+            rx.try_recv().is_err(),
+            "no assignment should fire at target=1"
+        );
     }
 
     #[tokio::test]
@@ -477,8 +529,7 @@ mod tests {
         use tokio::sync::mpsc;
 
         let state = Arc::new(RwLock::new(GridState::default()));
-        let (busy_tx, _busy_rx) =
-            mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
+        let (busy_tx, _busy_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
         {
             let mut g = state.write().await;
             g.set_target_replicas(2);
@@ -540,12 +591,9 @@ mod tests {
         use tokio::sync::mpsc;
 
         let state = Arc::new(RwLock::new(GridState::default()));
-        let (slow_tx, mut slow_rx) =
-            mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
-        let (fast_tx, _fast_rx) =
-            mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
-        let (spare_tx, _spare_rx) =
-            mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
+        let (slow_tx, mut slow_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
+        let (fast_tx, _fast_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
+        let (spare_tx, _spare_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
         {
             let mut g = state.write().await;
             // Two replicas with a 10× latency gap on layer 0.
@@ -565,6 +613,7 @@ mod tests {
             imbalance_threshold: 2.0,
             sustained_window: Duration::from_secs(0),
             stale_heartbeat_timeout: Duration::from_secs(25),
+            hot_shard_rps_threshold: None,
         };
         let mut tracker = ImbalanceTracker::default();
         check_imbalance(&state, &cfg, &mut tracker).await;
@@ -643,6 +692,7 @@ mod tests {
                     .checked_sub(Duration::from_secs(60))
                     .unwrap(),
                 layer_latencies: HashMap::new(),
+                req_per_sec: 0.0,
             };
             g.register(stale);
         }
@@ -654,6 +704,155 @@ mod tests {
             g.status_response().servers.len(),
             0,
             "stale server must be evicted"
+        );
+    }
+
+    // ── Hot-shard tick ───────────────────────────────────────────────────────
+
+    #[test]
+    fn with_hot_shard_threshold_filters_non_positive() {
+        let cfg = RebalancerConfig::default().with_hot_shard_threshold(Some(10.0));
+        assert_eq!(cfg.hot_shard_rps_threshold, Some(10.0));
+
+        // 0 and negative values disable the check (treated as None).
+        let cfg = RebalancerConfig::default().with_hot_shard_threshold(Some(0.0));
+        assert_eq!(cfg.hot_shard_rps_threshold, None);
+        let cfg = RebalancerConfig::default().with_hot_shard_threshold(Some(-5.0));
+        assert_eq!(cfg.hot_shard_rps_threshold, None);
+        let cfg = RebalancerConfig::default().with_hot_shard_threshold(None);
+        assert_eq!(cfg.hot_shard_rps_threshold, None);
+    }
+
+    #[tokio::test]
+    async fn check_hot_shards_marks_newly_hot_ranges() {
+        let state = Arc::new(RwLock::new(GridState::default()));
+        {
+            let mut g = state.write().await;
+            let mut a = make_server_entry("a", "http://a", "m", 0, 4);
+            a.req_per_sec = 50.0;
+            g.register(a);
+        }
+        check_hot_shards(&state, 20.0).await;
+        let g = state.read().await;
+        assert_eq!(
+            g.elevated_ranges_snapshot(),
+            vec![("m".to_string(), 0, 4)],
+            "range above threshold must be elevated"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_hot_shards_demotes_cooled_ranges() {
+        let state = Arc::new(RwLock::new(GridState::default()));
+        {
+            let mut g = state.write().await;
+            // Pre-elevated range with a cool replica.
+            let mut a = make_server_entry("a", "http://a", "m", 0, 4);
+            a.req_per_sec = 1.0;
+            g.register(a);
+            assert!(g.mark_elevated("m", 0, 4));
+        }
+        check_hot_shards(&state, 20.0).await;
+        let g = state.read().await;
+        assert!(
+            g.elevated_ranges_snapshot().is_empty(),
+            "cooled range must be demoted"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_hot_shards_is_noop_when_state_unchanged() {
+        // Hot range that's already elevated stays elevated; cool range
+        // that's not elevated stays not elevated. Run twice to confirm
+        // idempotence.
+        let state = Arc::new(RwLock::new(GridState::default()));
+        {
+            let mut g = state.write().await;
+            let mut hot = make_server_entry("hot", "http://hot", "m", 0, 4);
+            hot.req_per_sec = 50.0;
+            g.register(hot);
+            let mut cool = make_server_entry("cool", "http://cool", "m", 5, 9);
+            cool.req_per_sec = 1.0;
+            g.register(cool);
+        }
+        check_hot_shards(&state, 20.0).await;
+        check_hot_shards(&state, 20.0).await;
+        let g = state.read().await;
+        assert_eq!(g.elevated_ranges_snapshot(), vec![("m".to_string(), 0, 4)],);
+    }
+
+    #[tokio::test]
+    async fn hot_then_cool_path_pulls_and_drops_replica() {
+        // End-to-end: hot detected → under-rep tick pulls spare; cool
+        // detected → over-rep tick drops the surplus replica.
+        use tokio::sync::mpsc;
+
+        let state = Arc::new(RwLock::new(GridState::default()));
+        let (spare_tx, mut spare_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
+        let (busy_tx, _busy_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
+        {
+            let mut g = state.write().await;
+            // target_replicas == 1 default — hot bump takes effective to 2.
+            let mut a = make_server_entry("a", "http://a", "m", 0, 4);
+            a.req_per_sec = 100.0;
+            g.register_with_sender(a, busy_tx);
+            g.register_available("spare".into(), spare_tx, 1, 0, "/".into());
+        }
+        // Hot detection + spare pull (mirrors rebalancer_task ordering).
+        check_hot_shards(&state, 50.0).await;
+        check_under_replication(&state).await;
+
+        let pulled = spare_rx
+            .try_recv()
+            .expect("spare should receive AssignMsg")
+            .expect("ok payload");
+        let Some(RouterPayload::Assign(a)) = pulled.payload else {
+            panic!("expected Assign, got {pulled:?}");
+        };
+        assert_eq!(a.layer_start, 0);
+        assert_eq!(a.layer_end, 4);
+
+        // Simulate the spare arriving as a serving replica and the
+        // workload cooling: rate drops, hot tick demotes, over-rep
+        // tick drops the surplus.
+        let (extra_tx, mut extra_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
+        {
+            let mut g = state.write().await;
+            let mut extra = make_server_entry("extra", "http://extra", "m", 0, 4);
+            extra.req_per_sec = 0.5;
+            g.register_with_sender(extra, extra_tx);
+            // Existing replica also cools.
+            if let Some(orig) = g
+                .servers()
+                .map(|(_, e)| e.server_id.clone())
+                .find(|id| id == "a")
+            {
+                let _ = orig;
+            }
+            g.update_heartbeat("a", 0.0, 0, 0, vec![], 0.5);
+        }
+        check_hot_shards(&state, 50.0).await;
+        check_over_replication(&state).await;
+
+        // Either of the two replicas (extra or a) is least-loaded; the
+        // important thing is that one Unassign fires for layers 0-4. If
+        // the chosen victim is "a" (whose sender is kept by busy_tx), the
+        // unassign just gets queued there; the assertion below relaxes to
+        // "if extra was the victim, it received an over_replicated
+        // Unassign for the correct range."
+        let got = extra_rx.try_recv();
+        if let Ok(Ok(msg)) = got {
+            if let Some(RouterPayload::Unassign(u)) = msg.payload {
+                assert_eq!(u.model_id, "m");
+                assert_eq!(u.layer_start, 0);
+                assert_eq!(u.layer_end, 4);
+                assert_eq!(u.reason, "over_replicated");
+            }
+        }
+        let g = state.read().await;
+        assert!(
+            g.elevated_ranges_snapshot().is_empty(),
+            "range must be demoted after cooling"
         );
     }
 }

@@ -13,12 +13,54 @@ performance changes expected, none observed in the cross-check.
 
 | Engine | Decode (tok/s) | KV memory | Compression | Accuracy |
 |---|---|---|---|---|
+| `standard` (the production cache) | reference | full f16 K/V | 1× | exact (the reference) |
+| `no_cache` | O(N²); slowest at long context | only token IDs | n/a | exact (correctness fallback) |
 | `markov_residual` | ~95 | ~171 MB | ~287× | KL = 0.0 (exact) |
 | `unlimited_context` | ~94 | ~193 MB | ~254× | exact within window |
 | `turbo_quant` (4-bit) | ~95 | ~12.7 GB | ~4× | cos ≈ 0.991 |
 | `apollo` (boundaries) | ~8× faster | ~11 MB | ~4,414× | task-level |
 
-Reference: full f16 KV is ~49 GB on the same corpus.
+Reference for "compression" is full f16 KV at ~49 GB on the same corpus.
+
+## Engine-trait dispatch overhead (synthetic test_utils, M3 Max, CPU)
+
+Bench: `cargo bench -p larql-kv --bench engine_decode -- generate`. Times
+end-to-end generation (prefill + 8 decode steps) on the synthetic 2-layer
+test model. The engine-trait path constructs a `StandardEngine` and
+drives it through `generate_with_engine`; the legacy path calls
+`generate_cached_backend` directly. Both should be statistically
+indistinguishable.
+
+| Path | Time (median) | 95% CI |
+|---|---|---|
+| `legacy_generate_cached_backend` | 307 µs | 279–342 µs |
+| `engine_dispatch_standard` | 312 µs | 291–330 µs |
+
+Difference: ~1.6%, well within noise. The trait-vtable + engine
+construction overhead is negligible for the production cache wrapper.
+This is the empirical evidence supporting the "no regression on the
+default path" non-goal in the unification spec
+([§9](../larql-inference/docs/specs/kv-engine-unification.md)).
+
+## Per-engine prefill / decode-step times (synthetic, CPU)
+
+Bench: `cargo bench -p larql-kv --bench engine_decode`. 2-layer
+synthetic model, 8-token prompt. Useful for catching dispatch
+regressions in PR review; not a proxy for real-model decode speed.
+
+| Engine | Prefill (median) | Decode step (median) |
+|---|---|---|
+| `standard` | 15 µs | 50 µs |
+| `standard:window=4` | 15 µs | 7 µs (smaller K/V to attend over) |
+| `no-cache` | 15 µs | 183 µs (re-runs full forward) |
+| `markov-rs` | 16 µs | 118 µs (recompute K/V from residuals) |
+| `unlimited-context` | 58 µs | 8 µs |
+| `turbo-quant` (4-bit) | 23 µs | 437 µs (codec dominates on tiny model) |
+| `apollo` | 45 ns (no boundary store) | 2 ns (early-return) |
+
+The wide CIs on `standard` decode-step (39–55 µs) and `no-cache` /
+`markov-rs` reflect single-machine noise on the synthetic substrate; for
+real-model numbers see the table above.
 
 ## Per-engine notes
 

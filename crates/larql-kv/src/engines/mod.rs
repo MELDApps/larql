@@ -1,20 +1,27 @@
 //! KV-cache engine implementations.
 //!
-//! Each engine implements [`crate::KvEngine`] — a common interface
-//! for prefill + autoregressive decode that manages inference state differently:
+//! Each engine implements [`crate::KvEngine`] (which lives in
+//! `larql-inference::kv_engine` and is re-exported here) — a common
+//! interface for prefill + autoregressive decode that manages inference
+//! state differently:
 //!
 //! ## Engine ladder (Gemma 3 4B @ 370K tokens)
 //!
-//! | Engine | Speed (tok/s) | Memory | Compression | Accuracy |
-//! |---|---|---|---|---|
-//! | [`markov_residual`] | ~95 (Metal Q4K) | ~171 MB | ~287× | exact (KL=0.0) |
-//! | [`unlimited_context`] | ~94 (Metal Q4K) | ~193 MB | ~254× | exact within window |
-//! | [`turbo_quant`] | ~95 (Metal Q4K) | ~12.7 GB | ~4× | cos≈0.991 |
-//! | [`apollo`] | ~8× faster with boundaries | ~11 MB | ~4,414× | task accuracy |
+//! | Engine | Mechanism | Memory | Accuracy |
+//! |---|---|---|---|
+//! | [`standard`] | Production K/V tensor cache (default) | O(seq) f32 K/V | exact — the reference |
+//! | [`no_cache`] | Full re-forward per step | O(seq) token IDs | exact — correctness fallback |
+//! | [`markov_residual`] | Residual-stream replacement | ~171 MB | exact (KL=0.0) under contract |
+//! | [`unlimited_context`] | Per-window K/V checkpoints | ~193 MB | exact within window |
+//! | [`turbo_quant`] | WHT + Lloyd-Max 3/4-bit codec | ~12.7 GB | cos≈0.991 |
+//! | [`apollo`] | Boundary store + residual injection | ~11 MB | task accuracy |
 //!
 //! ## Selecting an engine
 //!
 //! ```text
+//! larql bench gemma3-4b-q4k --engine standard
+//! larql bench gemma3-4b-q4k --engine standard:window=1024
+//! larql bench gemma3-4b-q4k --engine no-cache
 //! larql bench gemma3-4b-q4k --engine markov-rs:window=512
 //! larql bench gemma3-4b-q4k --engine unlimited-context:window=256
 //! larql bench gemma3-4b-q4k --engine turbo-quant:bits=3
@@ -41,5 +48,7 @@
 
 pub mod apollo;
 pub mod markov_residual;
+pub mod no_cache;
+pub mod standard;
 pub mod turbo_quant;
 pub mod unlimited_context;

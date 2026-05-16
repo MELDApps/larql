@@ -32,6 +32,7 @@ fn make_entry(id: usize, layer_start: u32, layer_end: u32) -> ServerEntry {
         requests_in_flight: id as u32 % 10,
         last_seen: Instant::now(),
         layer_latencies: HashMap::new(),
+        req_per_sec: 0.0,
     }
 }
 
@@ -97,7 +98,7 @@ fn bench_heartbeat_update(c: &mut Criterion) {
             |b, ids| {
                 b.iter(|| {
                     // Update the first server's heartbeat.
-                    state.update_heartbeat(&ids[0], 50.0, 2 << 30, 5, layer_stats.clone());
+                    state.update_heartbeat(&ids[0], 50.0, 2 << 30, 5, layer_stats.clone(), 0.0);
                 });
             },
         );

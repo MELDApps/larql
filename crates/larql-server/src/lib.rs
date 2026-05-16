@@ -17,6 +17,7 @@ pub mod ffn_l2_cache;
 pub mod grpc;
 pub mod grpc_expert;
 pub mod http;
+pub mod shard_query;
 pub mod metrics;
 pub mod openapi;
 pub mod ratelimit;

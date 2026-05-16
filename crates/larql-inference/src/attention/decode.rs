@@ -317,15 +317,21 @@ pub fn run_attention_block_decode_step_backend(
         Some(norm_w) => rms_norm_heads(&q_full, norm_w, num_q, head_dim, qk_norm_off),
         None => q_full,
     };
-    let layer_rope_base = arch.rope_base_for_layer(layer);
+    let layer_rope_base =
+        crate::forward_overrides::effective_rope_base_for_layer(arch, layer);
     let rotary_frac = arch.rotary_fraction_for_layer(layer);
-    let q_rope = apply_rope_partial_at(
+    let pos_divisor =
+        crate::forward_overrides::effective_rope_position_divisor_for_layer(arch, layer);
+    let llama3 = crate::forward_overrides::effective_llama3_rope_scaling(arch);
+    let q_rope = crate::attention::rope::apply_rope_partial_at_full(
         &q_normed,
         num_q,
         head_dim,
         layer_rope_base,
         rotary_frac,
         position,
+        pos_divisor,
+        llama3,
     );
 
     // New token's K, V — RoPE'd at `position`, then appended to cache.
@@ -361,13 +367,15 @@ pub fn run_attention_block_decode_step_backend(
         Some(norm_w) => rms_norm_heads(&k_full_new, norm_w, num_kv, head_dim, qk_norm_off),
         None => k_full_new,
     };
-    let k_new_rope = apply_rope_partial_at(
+    let k_new_rope = crate::attention::rope::apply_rope_partial_at_full(
         &k_normed,
         num_kv,
         head_dim,
         layer_rope_base,
         rotary_frac,
         position,
+        pos_divisor,
+        llama3,
     );
 
     // Concatenate cache + new along seq axis.

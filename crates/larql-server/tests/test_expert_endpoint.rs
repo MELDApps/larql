@@ -59,6 +59,7 @@ impl TestMoeArch {
         Self {
             cfg: ModelConfig {
                 model_type: "test-moe".to_string(),
+                norm_eps: None,
                 num_layers: 1,
                 hidden_size: HIDDEN,
                 intermediate_size: 16,
@@ -280,6 +281,7 @@ fn make_loaded_model(
             larql_server::metrics::LayerLatencyTracker::new(),
         ),
         requests_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        requests_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         expert_filter: None,
         unit_filter: None,
         moe_remote: None,

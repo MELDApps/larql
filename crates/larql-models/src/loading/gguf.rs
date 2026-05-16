@@ -999,6 +999,7 @@ mod tests {
     ) -> crate::config::ModelConfig {
         crate::config::ModelConfig {
             model_type: "gpt2".into(),
+            norm_eps: None,
             num_layers,
             hidden_size: hidden,
             intermediate_size: 4 * hidden,
@@ -1137,6 +1138,7 @@ mod tests {
 
         let cfg = ModelConfig {
             model_type: "gpt2".into(),
+            norm_eps: None,
             num_layers: 1,
             hidden_size: 4,
             intermediate_size: 12,

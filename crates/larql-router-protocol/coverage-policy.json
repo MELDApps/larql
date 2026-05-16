@@ -1,0 +1,11 @@
+{
+  "policy_note": "Per-file 90% line coverage floor. The only source under `src/` is the QUIC transport wrapper — the rest of the crate is generated proto code (re-exported through `lib.rs`) that llvm-cov already excludes via the workspace `target/` filter. Baseline measured 2026-05-16. New files must hit 90% on first commit.",
+  "include_globs": [
+    "crates/larql-router-protocol/src/*.rs",
+    "crates/larql-router-protocol/src/**/*.rs"
+  ],
+  "exclude_globs": [],
+  "default_line_min_percent": 90.0,
+  "total_line_min_percent": 90.0,
+  "per_file_line_min_percent": {}
+}

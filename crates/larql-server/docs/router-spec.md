@@ -94,6 +94,10 @@ larql-server output/gemma3-4b-q4k.vindex \
 | `--port <PORT>` | 9090 | HTTP listen port. |
 | `--host <ADDR>` | 0.0.0.0 | Bind address. |
 | `--timeout-secs <N>` | 120 | Per-request timeout to backend shards. |
+| `--target-replicas <N>` | 1 | Phase 4 replication target per shard range. `>1` enables auto-replication from the available pool. |
+| `--rebalance-interval <SECS>` | 30 | GT6 rebalancer tick cadence. `0` disables dynamic rebalancing entirely. |
+| `--rebalance-threshold <RATIO>` | 2.0 | GT6 latency-imbalance trigger; the slowest replica must be this many times slower than the fastest. |
+| `--hot-shard-rps <FRAC>` | — | Hot-shard load-rate replication: a shard whose max `req_per_sec` across replicas exceeds this value is treated as effectively under-replicated (`target + 1`) until the rate subsides. Unset disables the check. |
 | `--log-level <LEVEL>` | info | Tracing log level. |
 
 At least one of `--shards` or `--grid-port` must be provided.
@@ -376,13 +380,14 @@ hop.
 
 Tracked in ADR-0003 / ADR-0004:
 
-- **Mode B (available)** — server starts empty and is assigned a shard by the router
-- **Stale heartbeat eviction** — automatic removal of servers that stop heartbeating
-- **Admin CLI** — `larql-router status / drain / assign / gaps`
 - **gRPC transport to backends** — fan-out currently uses HTTP/JSON; a future version
   will use raw f32 bytes over gRPC (ADR-0003 Phase 2)
 - **MoE expert dispatch** — routing by expert ID for mixture-of-experts models
-- **Rebalancing** — automatic under/over-replication management
+
+Already shipped (see `crates/larql-router/ROADMAP.md` for details):
+Mode B + Phase B2 drain/reassign, stale heartbeat eviction, admin CLI
+(`status` / `gaps` / `drain` / `assign`), dynamic rebalancing including
+hot-shard load-rate replication, QUIC transport.
 
 ---
 

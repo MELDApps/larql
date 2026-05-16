@@ -19,9 +19,7 @@ use larql_router_protocol::{
 };
 use tonic::transport::Server;
 
-async fn spawn_router(
-    grid_key: Option<String>,
-) -> (std::net::SocketAddr, Arc<RwLock<GridState>>) {
+async fn spawn_router(grid_key: Option<String>) -> (std::net::SocketAddr, Arc<RwLock<GridState>>) {
     let state = Arc::new(RwLock::new(GridState::default()));
     let svc = GridServiceImpl::new_with_key(state.clone(), grid_key);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -41,25 +39,24 @@ async fn spawn_router(
 async fn join_with_auth(
     addr: std::net::SocketAddr,
     bearer: Option<&'static str>,
-) -> Result<
-    (
-        mpsc::Sender<ServerMessage>,
-        tonic::Streaming<RouterMessage>,
-    ),
-    tonic::Status,
-> {
+) -> Result<(mpsc::Sender<ServerMessage>, tonic::Streaming<RouterMessage>), tonic::Status> {
     let channel = tonic::transport::Channel::from_shared(format!("http://{addr}"))
         .unwrap()
         .connect()
         .await
         .unwrap();
-    let mut client = GridServiceClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
-        if let Some(b) = bearer {
-            req.metadata_mut()
-                .insert("authorization", format!("Bearer {b}").parse().unwrap());
-        }
-        Ok(req)
-    });
+    // tonic's interceptor closure returns `Result<Request<()>, tonic::Status>`,
+    // and `Status` is ~176 bytes — that's the tonic API, not something we can
+    // box without forking the trait. Allow the lint locally.
+    #[allow(clippy::result_large_err)]
+    let mut client =
+        GridServiceClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
+            if let Some(b) = bearer {
+                req.metadata_mut()
+                    .insert("authorization", format!("Bearer {b}").parse().unwrap());
+            }
+            Ok(req)
+        });
     let (tx, rx) = mpsc::channel::<ServerMessage>(32);
     let response = client.join(ReceiverStream::new(rx)).await?;
     Ok((tx, response.into_inner()))
@@ -104,6 +101,7 @@ async fn announce_then_heartbeat_then_dropping() {
                 avg_ms: 1.5,
                 p99_ms: 3.0,
             }],
+            req_per_sec: 0.0,
         })),
     })
     .await
@@ -121,12 +119,14 @@ async fn announce_then_heartbeat_then_dropping() {
 
     // Dropping deregisters.
     tx.send(ServerMessage {
-        payload: Some(ServerPayload::Dropping(larql_router_protocol::DroppingMsg {
-            model_id: "m".into(),
-            layer_start: 0,
-            layer_end: 4,
-            reason: "shutdown".into(),
-        })),
+        payload: Some(ServerPayload::Dropping(
+            larql_router_protocol::DroppingMsg {
+                model_id: "m".into(),
+                layer_start: 0,
+                layer_end: 4,
+                reason: "shutdown".into(),
+            },
+        )),
     })
     .await
     .unwrap();
@@ -142,8 +142,7 @@ async fn missing_grid_key_is_rejected_with_unauthenticated() {
     let (addr, _state) = spawn_router(Some("topsecret".into())).await;
     let err = join_with_auth(addr, None)
         .await
-        .err()
-        .expect("join must fail without bearer");
+        .expect_err("join must fail without bearer");
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
 }
 
@@ -152,8 +151,7 @@ async fn wrong_grid_key_is_rejected() {
     let (addr, _state) = spawn_router(Some("topsecret".into())).await;
     let err = join_with_auth(addr, Some("wrong"))
         .await
-        .err()
-        .expect("join must fail with wrong bearer");
+        .expect_err("join must fail with wrong bearer");
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
 }
 
@@ -206,7 +204,10 @@ async fn available_followed_by_ready_registers_as_serving() {
             .iter()
             .map(|s| s.listen_url.clone())
             .collect();
-        assert!(urls.contains(&"http://spare:9999".to_string()), "got {urls:?}");
+        assert!(
+            urls.contains(&"http://spare:9999".to_string()),
+            "got {urls:?}"
+        );
     }
 }
 

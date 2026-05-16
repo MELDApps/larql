@@ -1,6 +1,6 @@
 //! Grid state and gRPC service implementation for the self-assembling FFN grid.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -36,6 +36,9 @@ pub struct ServerEntry {
     /// Per-layer EMA latency and p99, from HeartbeatMsg.layer_stats (GT3).
     /// Key = layer index. Empty until the first heartbeat with layer data arrives.
     pub layer_latencies: HashMap<u32, (f32, f32)>, // (avg_ms, p99_ms)
+    /// Shard-scoped request rate (requests/sec) from the most recent
+    /// heartbeat. Drives the hot-shard rebalancer tick.
+    pub req_per_sec: f32,
 }
 
 // ── Mode B: available server entry ───────────────────────────────────────────
@@ -72,6 +75,12 @@ pub struct GridState {
     /// fewer than N servers cover a range, the router pulls from the
     /// available pool to bring the count back up.
     target_replicas: u32,
+    /// Hot-shard book-keeping: ranges whose req/s currently exceeds the
+    /// hot-shard threshold get `effective_target_replicas = target + 1`
+    /// until the rate subsides. Rebalancer marks ranges on the hot-shard
+    /// tick; under/over-replication checks read this set via
+    /// `effective_target_for`.
+    elevated_ranges: HashSet<(String, u32, u32)>,
 }
 
 impl Default for GridState {
@@ -83,6 +92,7 @@ impl Default for GridState {
             available_servers: HashMap::new(),
             serving_senders: HashMap::new(),
             target_replicas: 1,
+            elevated_ranges: HashSet::new(),
         }
     }
 }
@@ -132,11 +142,13 @@ impl GridState {
         ram_used: u64,
         requests_in_flight: u32,
         layer_stats: Vec<LayerLatency>,
+        req_per_sec: f32,
     ) {
         if let Some(entry) = self.servers.get_mut(server_id) {
             entry.cpu_pct = cpu_pct;
             entry.ram_used = ram_used;
             entry.requests_in_flight = requests_in_flight;
+            entry.req_per_sec = req_per_sec;
             entry.last_seen = Instant::now();
             for ls in layer_stats {
                 entry
@@ -313,9 +325,7 @@ impl GridState {
         self.servers
             .values()
             .find(|e| {
-                e.model_id == model_id
-                    && e.layer_start <= layer_start
-                    && e.layer_end >= layer_end
+                e.model_id == model_id && e.layer_start <= layer_start && e.layer_end >= layer_end
             })
             .map(|e| (e.listen_url.clone(), e.vindex_hash.clone()))
     }
@@ -334,8 +344,7 @@ impl GridState {
         layer_end: u32,
         min_ram_bytes: u64,
     ) -> bool {
-        let Some((origin_url, shard_hash)) =
-            self.find_origin_for(model_id, layer_start, layer_end)
+        let Some((origin_url, shard_hash)) = self.find_origin_for(model_id, layer_start, layer_end)
         else {
             tracing::warn!(
                 model_id = %model_id,
@@ -413,9 +422,84 @@ impl GridState {
         self.target_replicas
     }
 
-    /// Phase 4: ranges that currently have more than `target_replicas`
-    /// distinct serving servers. Returns `(model_id, layer_start, layer_end,
-    /// surplus)` — surplus is the number of servers above the target.
+    /// Hot-shard detection: distinct `(model_id, layer_start, layer_end)`
+    /// ranges where at least one serving replica's most recent
+    /// `req_per_sec` heartbeat exceeds `threshold`. Returns an empty list
+    /// when `threshold <= 0` (the feature is disabled).
+    ///
+    /// Uses max-rate-across-replicas: if a router does perfect
+    /// load-balancing the rates converge, so any replica crossing the
+    /// threshold means the shard's per-replica load has saturated and
+    /// adding capacity is warranted. Sorted for deterministic iteration.
+    pub fn hot_layer_ranges(&self, threshold: f32) -> Vec<(String, u32, u32)> {
+        // `threshold > 0.0` returns false for NaN; the explicit not-greater
+        // form below disables the check for NaN and non-positives alike
+        // without tripping the `<=` NaN trap.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        let disabled = !(threshold > 0.0);
+        if disabled {
+            return Vec::new();
+        }
+        let mut max_rate: HashMap<(String, u32, u32), f32> = HashMap::new();
+        for e in self.servers.values() {
+            let key = (e.model_id.clone(), e.layer_start, e.layer_end);
+            let cur = max_rate.entry(key).or_insert(0.0);
+            if e.req_per_sec > *cur {
+                *cur = e.req_per_sec;
+            }
+        }
+        let mut out: Vec<(String, u32, u32)> = max_rate
+            .into_iter()
+            .filter_map(|(k, v)| if v > threshold { Some(k) } else { None })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Mark `(model_id, layer_start, layer_end)` as elevated so that
+    /// `effective_target_for` returns `target_replicas + 1`. Returns
+    /// `true` if this call newly inserted the range.
+    pub fn mark_elevated(&mut self, model_id: &str, layer_start: u32, layer_end: u32) -> bool {
+        self.elevated_ranges
+            .insert((model_id.to_owned(), layer_start, layer_end))
+    }
+
+    /// Clear the elevation flag for `(model_id, layer_start, layer_end)`.
+    /// Returns `true` if the range was previously elevated. After demotion
+    /// the standard over-replication tick drops the surplus replica.
+    pub fn demote_elevated(&mut self, model_id: &str, layer_start: u32, layer_end: u32) -> bool {
+        self.elevated_ranges
+            .remove(&(model_id.to_owned(), layer_start, layer_end))
+    }
+
+    /// Snapshot of currently-elevated ranges. Used by the hot-shard tick
+    /// to decide which previously-elevated ranges to demote.
+    pub fn elevated_ranges_snapshot(&self) -> Vec<(String, u32, u32)> {
+        let mut out: Vec<(String, u32, u32)> = self.elevated_ranges.iter().cloned().collect();
+        out.sort();
+        out
+    }
+
+    /// Effective replication target for a specific shard range.
+    /// Equal to `target_replicas`, plus 1 when the range is currently
+    /// marked elevated by the hot-shard tick.
+    pub fn effective_target_for(&self, model_id: &str, layer_start: u32, layer_end: u32) -> u32 {
+        let bump = if self
+            .elevated_ranges
+            .contains(&(model_id.to_owned(), layer_start, layer_end))
+        {
+            1
+        } else {
+            0
+        };
+        self.target_replicas + bump
+    }
+
+    /// Phase 4: ranges whose live replica count exceeds the effective
+    /// target. Hot ranges have effective target = target + 1, so the
+    /// over-replication tick won't strip a freshly-pulled hot spare;
+    /// once the hot signal clears, the elevated bump goes away and the
+    /// surplus replica is dropped on the next tick.
     pub fn over_replicated_ranges(&self) -> Vec<(String, u32, u32, u32)> {
         let mut counts: HashMap<(String, u32, u32), u32> = HashMap::new();
         for e in self.servers.values() {
@@ -425,8 +509,9 @@ impl GridState {
         }
         let mut out = Vec::new();
         for ((model_id, start, end), count) in counts {
-            if count > self.target_replicas {
-                out.push((model_id, start, end, count - self.target_replicas));
+            let effective = self.effective_target_for(&model_id, start, end);
+            if count > effective {
+                out.push((model_id, start, end, count - effective));
             }
         }
         out.sort();
@@ -444,16 +529,17 @@ impl GridState {
     ) -> Option<&ServerEntry> {
         self.servers
             .values()
-            .filter(|e| e.model_id == model_id && e.layer_start == layer_start && e.layer_end == layer_end)
+            .filter(|e| {
+                e.model_id == model_id && e.layer_start == layer_start && e.layer_end == layer_end
+            })
             .min_by_key(|e| e.requests_in_flight)
     }
 
-    /// Phase 4: ranges that currently have fewer than `target_replicas`
-    /// distinct serving servers. Returns `(model_id, layer_start, layer_end,
-    /// deficit)` per unique shard range. Skips ranges that have zero
-    /// servers — those are handled by `coverage_gaps()` / `try_fill_all_gaps()`
-    /// because they need a different origin-resolution story (no live
-    /// replica → no origin).
+    /// Phase 4: ranges whose live replica count is below the effective
+    /// target (= `target_replicas` plus the hot-shard bump). Skips ranges
+    /// that have zero servers — those are handled by `coverage_gaps()` /
+    /// `try_fill_all_gaps()` because they need a different
+    /// origin-resolution story (no live replica → no origin).
     pub fn under_replicated_ranges(&self) -> Vec<(String, u32, u32, u32)> {
         // Group by (model_id, layer_start, layer_end) → count of servers.
         let mut counts: HashMap<(String, u32, u32), u32> = HashMap::new();
@@ -464,8 +550,9 @@ impl GridState {
         }
         let mut out = Vec::new();
         for ((model_id, start, end), count) in counts {
-            if count > 0 && count < self.target_replicas {
-                out.push((model_id, start, end, self.target_replicas - count));
+            let effective = self.effective_target_for(&model_id, start, end);
+            if count > 0 && count < effective {
+                out.push((model_id, start, end, effective - count));
             }
         }
         out.sort();
@@ -522,8 +609,7 @@ impl GridState {
         };
         if let Err(e) = entry.sender.try_send(Ok(msg)) {
             // Put the entry back so a follow-up call can retry.
-            self.available_servers
-                .insert(server_id.to_string(), entry);
+            self.available_servers.insert(server_id.to_string(), entry);
             return Err(format!("send to {server_id:?} failed: {e}"));
         }
         tracing::info!(
@@ -778,6 +864,7 @@ impl GridService for GridServiceImpl {
                                 requests_in_flight: 0,
                                 last_seen: Instant::now(),
                                 layer_latencies: HashMap::new(),
+                                req_per_sec: 0.0,
                             };
                             state.write().await.register_with_sender(entry, tx.clone());
                             registered_model = Some((model_id, layer_start, layer_end));
@@ -799,6 +886,7 @@ impl GridService for GridServiceImpl {
                                 hb.ram_used,
                                 hb.requests_in_flight,
                                 hb.layer_stats,
+                                hb.req_per_sec,
                             );
                         }
 
@@ -871,8 +959,7 @@ impl GridService for GridServiceImpl {
                             // 2) If the spare wasn't used to fill a gap, try
                             //    using it to satisfy under-replication.
                             if !consumed {
-                                let replicated =
-                                    state.write().await.try_replicate_from_available();
+                                let replicated = state.write().await.try_replicate_from_available();
                                 if replicated > 0 {
                                     tracing::info!(
                                         replicated,
@@ -905,6 +992,7 @@ impl GridService for GridServiceImpl {
                                 requests_in_flight: 0,
                                 last_seen: std::time::Instant::now(),
                                 layer_latencies: HashMap::new(),
+                                req_per_sec: 0.0,
                             };
                             state.write().await.register_with_sender(entry, tx.clone());
                             registered_model =
@@ -998,10 +1086,7 @@ impl GridService for GridServiceImpl {
                 .servers()
                 .find(|(id, _)| **id == req.server_id)
                 .map(|(_, e)| (e.model_id.clone(), e.layer_start, e.layer_end));
-            (
-                guard.serving_sender(&req.server_id),
-                entry,
-            )
+            (guard.serving_sender(&req.server_id), entry)
         };
 
         let Some((model_id, layer_start, layer_end)) = layers else {
@@ -1050,7 +1135,10 @@ impl GridService for GridServiceImpl {
 
         // Resolve the origin: explicit > live replica.
         let (origin_url, shard_hash) = if !req.explicit_origin_url.is_empty() {
-            (req.explicit_origin_url.clone(), req.explicit_origin_hash.clone())
+            (
+                req.explicit_origin_url.clone(),
+                req.explicit_origin_hash.clone(),
+            )
         } else {
             match guard.find_origin_for(&req.model_id, req.layer_start, req.layer_end) {
                 Some(o) => o,
@@ -1088,7 +1176,10 @@ impl GridService for GridServiceImpl {
             ) {
                 Ok(()) => true,
                 Err(reason) => {
-                    return Ok(Response::new(AdminAck { ok: false, message: reason }));
+                    return Ok(Response::new(AdminAck {
+                        ok: false,
+                        message: reason,
+                    }));
                 }
             }
         };
@@ -1129,6 +1220,7 @@ mod tests {
             requests_in_flight: 0,
             last_seen: Instant::now(),
             layer_latencies: HashMap::new(),
+            req_per_sec: 0.0,
         }
     }
 
@@ -1189,8 +1281,8 @@ mod tests {
         state.register(entry("a", "http://a", "model-a", 0, 4));
         state.register(entry("b", "http://b", "model-a", 0, 4));
 
-        state.update_heartbeat("a", 80.0, 2048, 20, vec![]);
-        state.update_heartbeat("b", 10.0, 1024, 0, vec![]);
+        state.update_heartbeat("a", 80.0, 2048, 20, vec![], 0.0);
+        state.update_heartbeat("b", 10.0, 1024, 0, vec![], 0.0);
 
         assert_eq!(state.route(Some("model-a"), 2).as_deref(), Some("http://b"));
         let a = state.servers.get("a").unwrap();
@@ -1259,7 +1351,7 @@ mod tests {
             avg_ms: 3.5,
             p99_ms: 7.0,
         }];
-        state.update_heartbeat("a", 0.0, 0, 0, stats);
+        state.update_heartbeat("a", 0.0, 0, 0, stats, 0.0);
 
         let entry = state.servers.get("a").unwrap();
         assert_eq!(entry.layer_latencies.get(&2), Some(&(3.5, 7.0)));
@@ -1315,14 +1407,7 @@ mod tests {
     fn send_assign_to_named_available_unknown_id_errors() {
         let mut state = GridState::default();
         let err = state
-            .send_assign_to_named_available(
-                "no-such",
-                "test-model",
-                0,
-                4,
-                "http://origin",
-                "h",
-            )
+            .send_assign_to_named_available("no-such", "test-model", 0, 4, "http://origin", "h")
             .unwrap_err();
         assert!(err.contains("not in the available pool"));
     }
@@ -1336,14 +1421,7 @@ mod tests {
         state.register_available("target".into(), tx, 1, 0, "/".into());
 
         let err = state
-            .send_assign_to_named_available(
-                "target",
-                "m",
-                0,
-                4,
-                "http://origin",
-                "h",
-            )
+            .send_assign_to_named_available("target", "m", 0, 4, "http://origin", "h")
             .unwrap_err();
         assert!(err.contains("failed"));
         // Entry must still be in the pool for a follow-up retry.
@@ -1607,5 +1685,103 @@ mod tests {
         // Only gap-between-shards; shards are contiguous here.
         let gaps = state.coverage_gaps();
         assert!(gaps.is_empty());
+    }
+
+    // ── Hot-shard helpers ────────────────────────────────────────────────────
+
+    #[test]
+    fn heartbeat_stores_req_per_sec() {
+        let mut state = GridState::default();
+        state.register(entry("a", "http://a", "model-a", 0, 4));
+        state.update_heartbeat("a", 0.0, 0, 0, vec![], 12.5);
+        assert!((state.servers.get("a").unwrap().req_per_sec - 12.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hot_layer_ranges_empty_when_threshold_zero_or_negative() {
+        let mut state = GridState::default();
+        let mut a = entry("a", "http://a", "model-x", 0, 4);
+        a.req_per_sec = 100.0;
+        state.register(a);
+        // Disabled when threshold <= 0.
+        assert!(state.hot_layer_ranges(0.0).is_empty());
+        assert!(state.hot_layer_ranges(-1.0).is_empty());
+    }
+
+    #[test]
+    fn hot_layer_ranges_returns_max_across_replicas() {
+        // Two replicas of the same range, one hot, one cool — range is
+        // hot if max(req_per_sec) crosses the threshold.
+        let mut state = GridState::default();
+        let mut hot = entry("hot", "http://hot", "model-x", 0, 4);
+        hot.req_per_sec = 50.0;
+        let mut cool = entry("cool", "http://cool", "model-x", 0, 4);
+        cool.req_per_sec = 5.0;
+        state.register(hot);
+        state.register(cool);
+
+        let ranges = state.hot_layer_ranges(20.0);
+        assert_eq!(ranges, vec![("model-x".to_string(), 0, 4)]);
+
+        // Threshold above both replicas: range is not hot.
+        assert!(state.hot_layer_ranges(75.0).is_empty());
+    }
+
+    #[test]
+    fn elevated_ranges_lift_effective_target_for_over_and_under() {
+        let mut state = GridState::default();
+        state.set_target_replicas(2);
+        state.register(entry("a", "http://a", "model-x", 0, 4));
+        state.register(entry("b", "http://b", "model-x", 0, 4));
+        // At target: not over, not under.
+        assert!(state.over_replicated_ranges().is_empty());
+        assert!(state.under_replicated_ranges().is_empty());
+
+        // Elevate → effective target = 3. Two replicas now look under by 1.
+        assert!(state.mark_elevated("model-x", 0, 4));
+        assert_eq!(state.effective_target_for("model-x", 0, 4), 3);
+        assert_eq!(
+            state.under_replicated_ranges(),
+            vec![("model-x".to_string(), 0, 4, 1)]
+        );
+        assert!(state.over_replicated_ranges().is_empty());
+
+        // Add a third — at effective target, neither over nor under.
+        state.register(entry("c", "http://c", "model-x", 0, 4));
+        assert!(state.over_replicated_ranges().is_empty());
+        assert!(state.under_replicated_ranges().is_empty());
+
+        // Demote → effective target = 2. Three replicas surplus by 1.
+        assert!(state.demote_elevated("model-x", 0, 4));
+        assert_eq!(
+            state.over_replicated_ranges(),
+            vec![("model-x".to_string(), 0, 4, 1)]
+        );
+    }
+
+    #[test]
+    fn mark_elevated_is_idempotent_and_demote_reports_prior_state() {
+        let mut state = GridState::default();
+        assert!(state.mark_elevated("m", 0, 4)); // newly inserted
+        assert!(!state.mark_elevated("m", 0, 4)); // already there
+        assert!(state.demote_elevated("m", 0, 4)); // was present
+        assert!(!state.demote_elevated("m", 0, 4)); // already gone
+    }
+
+    #[test]
+    fn elevated_ranges_snapshot_sorted_and_isolated() {
+        let mut state = GridState::default();
+        state.mark_elevated("z", 0, 4);
+        state.mark_elevated("a", 5, 9);
+        state.mark_elevated("a", 0, 4);
+        let snap = state.elevated_ranges_snapshot();
+        assert_eq!(
+            snap,
+            vec![
+                ("a".to_string(), 0, 4),
+                ("a".to_string(), 5, 9),
+                ("z".to_string(), 0, 4),
+            ]
+        );
     }
 }

@@ -25,6 +25,7 @@ pub(super) fn run_engine(
     backend: Box<dyn larql_inference::ComputeBackend>,
     args: &BenchArgs,
 ) -> Result<BenchRow, Box<dyn std::error::Error>> {
+    use larql_inference::ffn::WeightFfn;
     use larql_inference::forward::hidden_to_raw_logits;
 
     let mut engine = kind.build_with_profiling(backend, args.profile);
@@ -40,10 +41,15 @@ pub(super) fn run_engine(
         eprintln!("[bench] {}", info.summary());
     }
 
+    // Default FFN: local dense compute from weights. The four shipped engines
+    // currently ignore this parameter, but the trait carries it for engines
+    // that want to route FFN (e.g. remote grid).
+    let ffn = WeightFfn { weights };
+
     // Prefill.
     let t_pre = Instant::now();
     let mut hidden = engine
-        .prefill(weights, token_ids)
+        .prefill(weights, &ffn, token_ids)
         .ok_or("engine prefill failed")?;
     let prefill_ms = t_pre.elapsed().as_secs_f64() * 1000.0;
 
@@ -58,7 +64,7 @@ pub(super) fn run_engine(
     for _ in 0..max_steps {
         let t = Instant::now();
         hidden = engine
-            .decode_step(weights, last_token)
+            .decode_step(weights, &ffn, last_token)
             .ok_or("engine decode_step failed")?;
         decode_ms_all.push(t.elapsed().as_secs_f64() * 1000.0);
         last_token = argmax_token(&hidden_to_raw_logits(weights, &hidden));
@@ -137,9 +143,14 @@ pub(super) fn run_engine_q4k(
         }};
     }
 
+    // Q4K engines currently dispatch FFN internally from `weights` and ignore
+    // this parameter. `NullFfn` satisfies the trait without taking a reference
+    // to `weights` (which is `&mut` here, so a `WeightFfn` would conflict).
+    let ffn = larql_inference::ffn::NullFfn;
+
     let t_pre = Instant::now();
     let mut hidden = engine
-        .prefill_q4k(weights, index, token_ids, be)
+        .prefill_q4k(weights, &ffn, index, token_ids, be)
         .ok_or("Q4K engine prefill failed")?;
     let prefill_ms = t_pre.elapsed().as_secs_f64() * 1000.0;
 
@@ -150,7 +161,7 @@ pub(super) fn run_engine_q4k(
     for _ in 0..max_steps {
         let t = Instant::now();
         hidden = engine
-            .decode_step_q4k(weights, index, last_token, be)
+            .decode_step_q4k(weights, &ffn, index, last_token, be)
             .ok_or("Q4K engine decode_step failed")?;
         decode_ms_all.push(t.elapsed().as_secs_f64() * 1000.0);
         last_token = pick_next!(&hidden);

@@ -73,6 +73,11 @@ message HeartbeatMsg {
   uint64 ram_used           = 2;
   uint32 requests_in_flight = 3;
   repeated LayerLatency layer_stats = 4;
+  // Shard-scoped request rate measured over the last heartbeat interval.
+  // Used by the rebalancer's hot-shard check (treats a range as effectively
+  // under-replicated when this exceeds the configured threshold). Zero
+  // when the server has not been processing requests.
+  float req_per_sec = 5;
 }
 
 message DroppingMsg {

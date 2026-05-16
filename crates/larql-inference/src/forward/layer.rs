@@ -9,7 +9,7 @@ use super::ple::apply_per_layer_embedding;
 use crate::attention::{AttentionWeights, SharedKV};
 use crate::ffn::FfnBackend;
 use crate::model::ModelWeights;
-use crate::residual::rms_norm;
+use crate::residual::rms_norm_for_arch;
 use ndarray::Array2;
 
 /// Public wrapper for run_attention — used by diagnostic/capture tooling.
@@ -92,7 +92,7 @@ pub fn run_ffn(
     };
     let h_ffn = match pre_ffn_key {
         Some(key) => apply_norm(weights, h_post_attn, &key, norm_offset),
-        None => rms_norm(h_post_attn, None, norm_offset),
+        None => rms_norm_for_arch(h_post_attn, None, norm_offset, &*weights.arch),
     };
     dump_f32("ffn_norm_out", &h_ffn);
 
@@ -108,7 +108,7 @@ pub fn run_ffn(
     let h_out = if arch.has_post_norms() {
         let normed = match arch.post_feedforward_layernorm_key(layer) {
             Some(key) => apply_norm(weights, &ffn_out, &key, norm_offset),
-            None => rms_norm(&ffn_out, None, norm_offset),
+            None => rms_norm_for_arch(&ffn_out, None, norm_offset, &*weights.arch),
         };
         if res_mult != 1.0 {
             h_post_attn + &(&normed * res_mult)

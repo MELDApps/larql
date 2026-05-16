@@ -198,23 +198,102 @@ where
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn generate_cached_hooked_inner(
+/// Drive autoregressive generation through any [`KvEngine`].
+///
+/// This is the engine-trait-based equivalent of [`generate_cached_backend`]:
+/// same prefill → sample → decode loop → sample → ... shape, but the
+/// per-stage forward passes are delegated to `engine.prefill` /
+/// `engine.decode_step`. Sampling, tokenizer decoding, and EOS detection
+/// remain centralized here so every engine produces a stream with
+/// identical sampling semantics.
+///
+/// Parity contract: with `engine = StandardEngine::new(window)`, the
+/// returned `Vec<u32>` is bit-identical to
+/// `generate_cached_backend(weights, tokenizer, ffn, prompt, max,
+/// backend, window, ...)`. This is the parity gate for the unification
+/// migration (see `docs/specs/kv-engine-unification.md` §8.4).
+pub fn generate_with_engine<F>(
+    engine: &mut dyn crate::KvEngine,
     weights: &ModelWeights,
     tokenizer: &tokenizers::Tokenizer,
     ffn: &dyn FfnBackend,
     prompt_ids: &[u32],
     max_new_tokens: usize,
-    window: Option<usize>,
-    backend: Option<&dyn larql_compute::ComputeBackend>,
-    hook: &mut dyn LayerHook,
-    on_token: &mut dyn FnMut(u32, &str),
-) -> Vec<u32> {
+    mut on_token: F,
+) -> Vec<u32>
+where
+    F: FnMut(u32, &str),
+{
     if max_new_tokens == 0 || prompt_ids.is_empty() {
         return Vec::new();
     }
 
-    // ── Phase 1: prefill — full forward pass capturing K/V per layer ──
+    // ── Phase 1: prefill ──
+    let last_hidden = match engine.prefill(weights, ffn, prompt_ids) {
+        Some(h) => h,
+        None => return Vec::new(),
+    };
+
+    // Sample first new token from the prefill-end hidden state.
+    let first = match argmax_next_token(weights, tokenizer, &last_hidden) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+    on_token(first.0, &first.1);
+
+    let mut generated = Vec::with_capacity(max_new_tokens);
+    generated.push(first.0);
+    if is_stop_token_str(&first.1) {
+        return generated;
+    }
+    if max_new_tokens == 1 {
+        return generated;
+    }
+
+    // ── Phase 2: decode loop ──
+    let mut current_id = first.0;
+    for _step in 1..max_new_tokens {
+        let h_step = match engine.decode_step(weights, ffn, current_id) {
+            Some(h) => h,
+            None => break,
+        };
+        let (id, tok_str) = match argmax_next_token(weights, tokenizer, &h_step) {
+            Some(t) => t,
+            None => break,
+        };
+        on_token(id, &tok_str);
+        generated.push(id);
+        if is_stop_token_str(&tok_str) {
+            break;
+        }
+        current_id = id;
+    }
+
+    generated
+}
+
+/// Prefill phase as a reusable building block: runs a full forward over
+/// `prompt_ids`, populates a fresh [`KvCache`] (bounded if `window` is
+/// `Some`), and returns `(last_hidden_1xD, populated_cache)`.
+///
+/// Returns `None` if the prompt is empty or if any layer's attention
+/// fails. This is the production K/V cache prefill loop, extracted so
+/// `KvEngine::prefill` impls in `larql-kv` can call it directly.
+///
+/// The caller applies `final_norm + lm_head` to the returned hidden
+/// state to get logits.
+#[allow(clippy::too_many_arguments)]
+pub fn kv_prefill_run(
+    weights: &ModelWeights,
+    ffn: &dyn FfnBackend,
+    prompt_ids: &[u32],
+    window: Option<usize>,
+    backend: Option<&dyn larql_compute::ComputeBackend>,
+    hook: &mut dyn LayerHook,
+) -> Option<(Array2<f32>, KvCache)> {
+    if prompt_ids.is_empty() {
+        return None;
+    }
     let num_layers = weights.num_layers;
     let mut cache = match window {
         Some(w) => KvCache::with_window(num_layers, w),
@@ -226,10 +305,7 @@ fn generate_cached_hooked_inner(
         hook.on_pre_layer(layer, &h);
 
         let (mut h_post_attn, k_rope, v) =
-            match run_attention_with_kv_backend(weights, &h, layer, backend) {
-                Some(t) => t,
-                None => return Vec::new(),
-            };
+            run_attention_with_kv_backend(weights, &h, layer, backend)?;
         cache.layers[layer] = Some((k_rope, v));
         // Apply the window bound immediately — if prompt is longer
         // than the window, attention during later decode steps only
@@ -249,8 +325,83 @@ fn generate_cached_hooked_inner(
     // regardless of how many older positions were evicted.
     cache.next_position = prompt_ids.len();
 
+    Some((last_row_as_2d(&h), cache))
+}
+
+/// Decode-step phase as a reusable building block: takes one new
+/// `token_id`, runs the autoregressive attention against an existing
+/// populated [`KvCache`], mutates the cache to append the new K/V (and
+/// clip to window), and returns the new token's hidden state (shape
+/// `[1, hidden_dim]`).
+///
+/// Returns `None` if any layer's attention fails. This is the
+/// production decode step extracted so `KvEngine::decode_step` impls
+/// in `larql-kv` can call it directly.
+#[allow(clippy::too_many_arguments)]
+pub fn kv_decode_step_run(
+    weights: &ModelWeights,
+    ffn: &dyn FfnBackend,
+    cache: &mut KvCache,
+    token_id: u32,
+    backend: Option<&dyn larql_compute::ComputeBackend>,
+    hook: &mut dyn LayerHook,
+) -> Option<Array2<f32>> {
+    let num_layers = weights.num_layers;
+    let h_new = embed_tokens_pub(weights, &[token_id]);
+    let abs_position = cache.next_position;
+    let mut h_step = h_new;
+    for layer in 0..num_layers {
+        hook.on_pre_layer(layer, &h_step);
+
+        let kv_entry = cache.layers[layer].as_ref();
+        let (mut h_post_attn, new_kv) = run_attention_block_decode_step_backend(
+            weights,
+            &h_step,
+            layer,
+            kv_entry,
+            abs_position,
+            backend,
+        )?;
+        cache.layers[layer] = Some(new_kv);
+        // Sliding window — evict the oldest row(s) if we've
+        // exceeded `max_window`. No-op when unbounded.
+        cache.clip_layer(layer);
+
+        hook.on_post_attention(layer, &mut h_post_attn);
+
+        let (mut h_out, _) = run_ffn(weights, &h_post_attn, layer, ffn, false);
+
+        hook.on_post_layer(layer, &mut h_out);
+        h_step = h_out;
+    }
+    cache.next_position += 1;
+    Some(h_step)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_cached_hooked_inner(
+    weights: &ModelWeights,
+    tokenizer: &tokenizers::Tokenizer,
+    ffn: &dyn FfnBackend,
+    prompt_ids: &[u32],
+    max_new_tokens: usize,
+    window: Option<usize>,
+    backend: Option<&dyn larql_compute::ComputeBackend>,
+    hook: &mut dyn LayerHook,
+    on_token: &mut dyn FnMut(u32, &str),
+) -> Vec<u32> {
+    if max_new_tokens == 0 || prompt_ids.is_empty() {
+        return Vec::new();
+    }
+
+    // ── Phase 1: prefill ──
+    let (last_hidden, mut cache) =
+        match kv_prefill_run(weights, ffn, prompt_ids, window, backend, hook) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+
     // Sample first new token from the prefill-end hidden state.
-    let last_hidden = last_row_as_2d(&h);
     let first = match argmax_next_token(weights, tokenizer, &last_hidden) {
         Some(t) => t,
         None => return Vec::new(),
@@ -269,40 +420,10 @@ fn generate_cached_hooked_inner(
     // ── Phase 2: decode loop ──
     let mut current_id = first.0;
     for _step in 1..max_new_tokens {
-        let h_new = embed_tokens_pub(weights, &[current_id]);
-
-        let abs_position = cache.next_position;
-        let mut h_step = h_new;
-        for layer in 0..num_layers {
-            hook.on_pre_layer(layer, &h_step);
-
-            let kv_entry = cache.layers[layer].as_ref();
-            let (mut h_post_attn, new_kv) = match run_attention_block_decode_step_backend(
-                weights,
-                &h_step,
-                layer,
-                kv_entry,
-                abs_position,
-                backend,
-            ) {
-                Some(t) => t,
-                None => return generated,
-            };
-            cache.layers[layer] = Some(new_kv);
-            // Sliding window — evict the oldest row(s) if we've
-            // exceeded `max_window`. No-op when unbounded.
-            cache.clip_layer(layer);
-
-            hook.on_post_attention(layer, &mut h_post_attn);
-
-            let (mut h_out, _) = run_ffn(weights, &h_post_attn, layer, ffn, false);
-
-            hook.on_post_layer(layer, &mut h_out);
-            h_step = h_out;
-        }
-        // Increment absolute position for the next iteration.
-        cache.next_position += 1;
-
+        let h_step = match kv_decode_step_run(weights, ffn, &mut cache, current_id, backend, hook) {
+            Some(h) => h,
+            None => break,
+        };
         // h_step is [1, hidden] — project to logits and argmax.
         let (id, tok_str) = match argmax_next_token(weights, tokenizer, &h_step) {
             Some(t) => t,
@@ -502,6 +623,181 @@ mod tests {
             |_, _| {},
         );
         assert!(ids.len() <= 4);
+    }
+
+    // ── generate_with_engine coverage ─────────────────────────────────────
+    //
+    // The engine-dispatch helper is exercised end-to-end by `larql-kv`'s
+    // parity tests, but `cargo llvm-cov` doesn't credit cross-crate
+    // coverage. These in-crate tests use a synthetic engine that returns
+    // deterministic hidden states to drive the helper through each branch:
+    // empty inputs, max_new_tokens=0, max_new_tokens=1, normal multi-step
+    // generation, prefill failure, decode failure.
+
+    use super::{generate_with_engine, kv_decode_step_run, kv_prefill_run};
+
+    struct StubEngine {
+        cache: Option<crate::attention::KvCache>,
+        fail_prefill: bool,
+        fail_decode_after: Option<usize>,
+        decode_count: usize,
+    }
+
+    impl crate::KvEngine for StubEngine {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        fn info(&self) -> crate::EngineInfo {
+            crate::EngineInfo {
+                name: "stub".into(),
+                description: "test fixture".into(),
+                backend: "cpu".into(),
+                config: String::new(),
+            }
+        }
+        fn prefill(
+            &mut self,
+            weights: &ModelWeights,
+            ffn: &dyn FfnBackend,
+            token_ids: &[u32],
+        ) -> Option<Array2<f32>> {
+            if self.fail_prefill {
+                return None;
+            }
+            let (hidden, cache) =
+                kv_prefill_run(weights, ffn, token_ids, None, None, &mut NoopHook)?;
+            self.cache = Some(cache);
+            Some(hidden)
+        }
+        fn decode_step(
+            &mut self,
+            weights: &ModelWeights,
+            ffn: &dyn FfnBackend,
+            token_id: u32,
+        ) -> Option<Array2<f32>> {
+            self.decode_count += 1;
+            if let Some(limit) = self.fail_decode_after {
+                if self.decode_count > limit {
+                    return None;
+                }
+            }
+            let cache = self.cache.as_mut()?;
+            kv_decode_step_run(weights, ffn, cache, token_id, None, &mut NoopHook)
+        }
+        fn memory_bytes(&self) -> usize {
+            0
+        }
+    }
+
+    fn fresh_stub() -> StubEngine {
+        StubEngine {
+            cache: None,
+            fail_prefill: false,
+            fail_decode_after: None,
+            decode_count: 0,
+        }
+    }
+
+    #[test]
+    fn generate_with_engine_empty_prompt_returns_empty() {
+        let weights = make_test_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let ffn = WeightFfn { weights: &weights };
+        let mut eng = fresh_stub();
+        let out = generate_with_engine(&mut eng, &weights, &tokenizer, &ffn, &[], 5, |_, _| {});
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn generate_with_engine_zero_max_returns_empty() {
+        let weights = make_test_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let ffn = WeightFfn { weights: &weights };
+        let mut eng = fresh_stub();
+        let out = generate_with_engine(
+            &mut eng,
+            &weights,
+            &tokenizer,
+            &ffn,
+            &[0u32, 1],
+            0,
+            |_, _| {},
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn generate_with_engine_max_one_returns_single_token() {
+        let weights = make_test_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let ffn = WeightFfn { weights: &weights };
+        let mut eng = fresh_stub();
+        let out = generate_with_engine(
+            &mut eng,
+            &weights,
+            &tokenizer,
+            &ffn,
+            &[0u32, 1],
+            1,
+            |_, _| {},
+        );
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn generate_with_engine_multi_step_fires_callback_per_token() {
+        let weights = make_test_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let ffn = WeightFfn { weights: &weights };
+        let mut eng = fresh_stub();
+        let mut callbacks = 0usize;
+        let out = generate_with_engine(
+            &mut eng,
+            &weights,
+            &tokenizer,
+            &ffn,
+            &[0u32, 1],
+            4,
+            |_, _| callbacks += 1,
+        );
+        assert_eq!(out.len(), callbacks);
+        assert!(out.len() <= 4);
+    }
+
+    #[test]
+    fn generate_with_engine_prefill_failure_returns_empty() {
+        let weights = make_test_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let ffn = WeightFfn { weights: &weights };
+        let mut eng = fresh_stub();
+        eng.fail_prefill = true;
+        let out = generate_with_engine(&mut eng, &weights, &tokenizer, &ffn, &[0u32], 3, |_, _| {});
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn generate_with_engine_decode_failure_breaks_loop_early() {
+        let weights = make_test_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let ffn = WeightFfn { weights: &weights };
+        let mut eng = fresh_stub();
+        // First decode_step returns hidden; second returns None.
+        eng.fail_decode_after = Some(1);
+        let out = generate_with_engine(
+            &mut eng,
+            &weights,
+            &tokenizer,
+            &ffn,
+            &[0u32, 1],
+            5,
+            |_, _| {},
+        );
+        // Prefill produces token 0, decode 1 produces token 1, decode 2 fails.
+        assert!(
+            out.len() <= 2,
+            "should break after decode failure, got {} tokens",
+            out.len()
+        );
     }
 
     #[test]

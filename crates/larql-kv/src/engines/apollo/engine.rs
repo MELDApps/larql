@@ -25,6 +25,7 @@ use super::entry::{InjectionConfig, VecInjectEntry};
 use super::routing::{RoutingIndex, RoutingQuery};
 use super::store::ApolloStore;
 use crate::{EngineInfo, KvEngine};
+use larql_inference::ffn::FfnBackend;
 use larql_inference::forward::{embed_tokens_pub, forward_from_layer, forward_raw_logits};
 use larql_inference::model::ModelWeights;
 
@@ -336,7 +337,12 @@ impl KvEngine for ApolloEngine {
     /// `crystal_layer..num_layers` (~4 layers for Gemma 3 4B), ~8.5× faster.
     ///
     /// **Uncompressed path** (no boundaries): full forward over window+query tokens.
-    fn prefill(&mut self, weights: &ModelWeights, token_ids: &[u32]) -> Option<Array2<f32>> {
+    fn prefill(
+        &mut self,
+        weights: &ModelWeights,
+        _ffn: &dyn FfnBackend,
+        token_ids: &[u32],
+    ) -> Option<Array2<f32>> {
         if self.routing.is_empty() {
             let store = self.store.as_ref()?;
             self.routing = RoutingIndex::from_store(store);
@@ -368,7 +374,12 @@ impl KvEngine for ApolloEngine {
 
     /// Extend by one token. Uses the boundary compressed path when available
     /// (4 layers), otherwise full 34-layer re-forward.
-    fn decode_step(&mut self, weights: &ModelWeights, token_id: u32) -> Option<Array2<f32>> {
+    fn decode_step(
+        &mut self,
+        weights: &ModelWeights,
+        _ffn: &dyn FfnBackend,
+        token_id: u32,
+    ) -> Option<Array2<f32>> {
         self.context_tokens.push(token_id);
         let delta = self.injection_delta.as_ref()?;
         let perturb = Some((self.config.injection_layer, delta.view()));
@@ -707,25 +718,33 @@ mod tests {
 
     #[test]
     fn prefill_compressed_returns_hidden_state() {
+        use larql_inference::ffn::WeightFfn;
         let weights = larql_inference::test_utils::make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = mk_apollo_for_synthetic_weights(&weights);
         // Use one of the window tokens so routing succeeds.
-        let h = engine.prefill(&weights, &[0u32, 1u32]).expect("prefill");
+        let h = engine
+            .prefill(&weights, &ffn, &[0u32, 1u32])
+            .expect("prefill");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
 
     #[test]
     fn decode_step_after_compressed_prefill_grows_context() {
+        use larql_inference::ffn::WeightFfn;
         let weights = larql_inference::test_utils::make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = mk_apollo_for_synthetic_weights(&weights);
-        engine.prefill(&weights, &[0u32]).expect("prefill");
-        let h = engine.decode_step(&weights, 1).expect("decode_step");
+        engine.prefill(&weights, &ffn, &[0u32]).expect("prefill");
+        let h = engine.decode_step(&weights, &ffn, 1).expect("decode_step");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
 
     #[test]
     fn prefill_uncompressed_path_when_no_boundaries() {
+        use larql_inference::ffn::WeightFfn;
         let weights = larql_inference::test_utils::make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut store = mk_store_in_vocab(2, 4, weights.hidden_size, weights.vocab_size);
         store.boundaries.clear();
         let mut engine = ApolloEngine::new(InjectionConfig {
@@ -737,17 +756,19 @@ mod tests {
         engine.build_routing_index().unwrap();
         // Token 0 is in window 0 → routing finds it; uncompressed full forward runs.
         let h = engine
-            .prefill(&weights, &[0u32, 1u32])
+            .prefill(&weights, &ffn, &[0u32, 1u32])
             .expect("prefill uncompressed");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
 
     #[test]
     fn prefill_returns_none_without_routing_or_store() {
+        use larql_inference::ffn::WeightFfn;
         let weights = larql_inference::test_utils::make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         // No store → routing won't initialize from store.
         let mut engine = ApolloEngine::new(InjectionConfig::default());
-        assert!(engine.prefill(&weights, &[0u32]).is_none());
+        assert!(engine.prefill(&weights, &ffn, &[0u32]).is_none());
     }
 
     // ── query_greedy ─────────────────────────────────────────────────────────

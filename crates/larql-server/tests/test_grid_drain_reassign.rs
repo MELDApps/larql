@@ -53,10 +53,7 @@ async fn spawn_live_origin(
     listen_url: &str,
     layer_start: u32,
     layer_end: u32,
-) -> (
-    mpsc::Sender<ServerMessage>,
-    tonic::Streaming<RouterMessage>,
-) {
+) -> (mpsc::Sender<ServerMessage>, tonic::Streaming<RouterMessage>) {
     let mut client = GridServiceClient::connect(format!("http://{router_addr}"))
         .await
         .unwrap();
@@ -103,6 +100,7 @@ async fn drain_then_reassign_via_available_after_drain() {
         vindex_hash: "drained-hash".into(),
         latency_tracker: Arc::new(LayerLatencyTracker::new()),
         requests_in_flight: Arc::new(AtomicU32::new(0)),
+        requests_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         available_after_drain: Some(AvailableConfig {
             join_url: format!("http://{router_addr}"),
             listen_url: "http://drained:8080".into(),

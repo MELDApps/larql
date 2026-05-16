@@ -7,6 +7,7 @@
   "exclude_globs": [
     "crates/larql-cli/src/commands/primary/bench/run.rs",
     "crates/larql-cli/src/commands/primary/bench/engine_runtime.rs",
+    "crates/larql-cli/src/commands/primary/bench/grid_lan_runtime.rs",
     "crates/larql-cli/src/commands/primary/bench/local_runtime.rs",
     "crates/larql-cli/src/commands/primary/bench/remote_ffn_runtime.rs",
     "crates/larql-cli/src/commands/primary/bench/remote_moe_runtime.rs"

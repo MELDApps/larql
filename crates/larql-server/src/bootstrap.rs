@@ -357,6 +357,7 @@ pub fn load_single_vindex(
         ffn_l2_cache: crate::ffn_l2_cache::FfnL2Cache::new(num_layers),
         layer_latency_tracker: std::sync::Arc::new(crate::metrics::LayerLatencyTracker::new()),
         requests_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        requests_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         expert_filter: opts.expert_filter,
         unit_filter: opts.unit_filter.clone(),
         moe_remote: opts.moe_remote.clone(),
@@ -579,6 +580,16 @@ pub struct Cli {
     /// gRPC port (enables gRPC server alongside HTTP).
     #[arg(long)]
     pub grpc_port: Option<u16>,
+
+    /// Cosine threshold for the Exp 53 `ShardService.Query` KNN cache.
+    /// When set, the gRPC server registers a `ShardService` backed by
+    /// an in-memory cache; clients hit it when their query vector
+    /// matches an indexed entry at `cos >= tau`. Disk-format loaders
+    /// are a follow-up — the v1 cache starts empty and is populated
+    /// in-process (typically by tests). Common production value is
+    /// `0.97` matching the Python prototype.
+    #[arg(long, value_name = "TAU")]
+    pub shard_query_tau: Option<f32>,
 
     /// TLS certificate path for HTTPS.
     #[arg(long)]
@@ -950,6 +961,17 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
     if let Some(grpc_port) = cli.grpc_port {
         let grpc_addr = format!("{}:{}", cli.host, grpc_port).parse()?;
         let grpc_state = Arc::clone(&state);
+        // Exp 53 ShardService cache. Built here (not on AppState) so the
+        // feature is wholly opt-in via `--shard-query-tau` and adds no
+        // bytes to deployments that don't run a sharded vindex cache.
+        let shard_cache = cli.shard_query_tau.map(|tau| {
+            info!(
+                "ShardService: enabled with tau={tau}, cache starts empty (loaders are follow-up work)"
+            );
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::shard_query::ShardCache::new(tau),
+            ))
+        });
         info!("gRPC: listening on {}", grpc_addr);
         tokio::spawn(async move {
             let vindex_svc = grpc::VindexGrpcService {
@@ -958,14 +980,18 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
             let expert_svc = grpc_expert::ExpertGrpcService {
                 state: Arc::clone(&grpc_state),
             };
-            if let Err(e) = tonic::transport::Server::builder()
+            let mut builder = tonic::transport::Server::builder()
                 .add_service(
                     grpc::proto::vindex_service_server::VindexServiceServer::new(vindex_svc),
                 )
-                .add_service(larql_router_protocol::ExpertServiceServer::new(expert_svc))
-                .serve(grpc_addr)
-                .await
-            {
+                .add_service(larql_router_protocol::ExpertServiceServer::new(expert_svc));
+            if let Some(cache) = shard_cache {
+                let shard_svc = crate::shard_query::ShardGrpcService::new(cache);
+                builder = builder.add_service(
+                    larql_router_protocol::ShardServiceServer::new(shard_svc),
+                );
+            }
+            if let Err(e) = builder.serve(grpc_addr).await {
                 tracing::error!("gRPC server error: {}", e);
             }
         });
@@ -1022,7 +1048,9 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
         // available pool after a drain instead of just disconnecting (GT6
         // §Phase B2). The construction logic + tests live in `announce.rs`.
         let available_after_drain = announce::build_available_after_drain(
-            cli.available_ram.as_deref().and_then(|s| parse_ram_bytes(s).ok()),
+            cli.available_ram
+                .as_deref()
+                .and_then(|s| parse_ram_bytes(s).ok()),
             &listen_url,
             cli.vindex_store.as_deref(),
             cli.grid_key.as_deref(),
@@ -1051,6 +1079,7 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
                     vindex_hash: vhash.clone(),
                     latency_tracker: m.layer_latency_tracker.clone(),
                     requests_in_flight: m.requests_in_flight.clone(),
+                    requests_total: m.requests_total.clone(),
                     available_after_drain: avail,
                     quic_cert_fingerprint: cli.quic_cert_fingerprint.clone(),
                 });

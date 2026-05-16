@@ -80,11 +80,26 @@ fn generate_via_cpu_q4k_cached(
     // already account for the prompt pass via `prefill_ms`. Mixing them
     // here would mis-attribute the one-shot prefill cost to decode.
 
+    let backend: Box<dyn larql_compute::ComputeBackend> = Box::new(larql_compute::CpuBackend);
+    // Q4_K view of the lm_head, synthesised from the f16 embeddings at
+    // vindex load for tied-embedding models (Gemma, Llama). When
+    // available we route the lm_head matmul through `q4k_matvec`
+    // instead of the f32 row-parallel sgemv — drops lm_head bandwidth
+    // from ~2.7 GB to ~0.7 GB per step.
+    let lm_head_q4: Option<&[u8]> = index.storage.lm_head_q4_view().map(|b| b.as_ref());
+    let lm_head_vocab = index.vocab_size;
+
     // lm_head + argmax on the last prompt position to seed decode.
     let h_last = last_row_as_2d(&h_prompt);
     let lm_head_start = std::time::Instant::now();
-    let first =
-        crate::forward::predict::logits_to_predictions_pub(weights, &h_last, tokenizer, 5, 1.0);
+    let first = lm_head_predict(
+        weights,
+        &h_last,
+        tokenizer,
+        backend.as_ref(),
+        lm_head_q4,
+        lm_head_vocab,
+    );
     let mut t_lm_head = lm_head_start.elapsed().as_secs_f64() * 1000.0;
     let prefill_ms = prefill_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -127,7 +142,6 @@ fn generate_via_cpu_q4k_cached(
 
     // ── Decode loop ────────────────────────────────────────────────
     let prompt_len = token_ids.len();
-    let backend: Box<dyn larql_compute::ComputeBackend> = Box::new(larql_compute::CpuBackend);
     for step in 1..max_tokens {
         let abs_position = prompt_len + (step - 1);
         let t0 = std::time::Instant::now();
@@ -162,8 +176,14 @@ fn generate_via_cpu_q4k_cached(
         t_cpu_fwd += hidden_ms;
 
         let lm_head_start = std::time::Instant::now();
-        let result =
-            crate::forward::predict::logits_to_predictions_pub(weights, &h_new, tokenizer, 5, 1.0);
+        let result = lm_head_predict(
+            weights,
+            &h_new,
+            tokenizer,
+            backend.as_ref(),
+            lm_head_q4,
+            lm_head_vocab,
+        );
         let lm_head_ms = lm_head_start.elapsed().as_secs_f64() * 1000.0;
         t_lm_head += lm_head_ms;
         decode_ms.push(hidden_ms + lm_head_ms);
@@ -301,6 +321,30 @@ fn last_row_as_2d(h: &ndarray::Array2<f32>) -> ndarray::Array2<f32> {
     let mut out = ndarray::Array2::<f32>::zeros((1, hidden));
     out.row_mut(0).assign(&h.row(seq_len - 1));
     out
+}
+
+/// Decode-loop lm_head wrapper. When the vindex carries a Q4_K view of
+/// the LM head (always true for tied-embedding models — Gemma 3/4,
+/// Llama with `tie_word_embeddings=true`) the matmul runs through
+/// `q4k_matvec` against the synthesised Q4_K bytes, saving ~2 GB of
+/// f32 bandwidth per step on Gemma 3 4B. Falls back to the f32
+/// row-parallel path when the Q4 view is missing.
+fn lm_head_predict(
+    weights: &ModelWeights,
+    h: &ndarray::Array2<f32>,
+    tokenizer: &tokenizers::Tokenizer,
+    backend: &dyn larql_compute::ComputeBackend,
+    q4_lm_head: Option<&[u8]>,
+    vocab: usize,
+) -> crate::forward::PredictResult {
+    if let Some(q4_bytes) = q4_lm_head {
+        if vocab > 0 {
+            return crate::forward::predict::logits_to_predictions_q4_lm_head(
+                weights, h, q4_bytes, vocab, backend, tokenizer, 5, 1.0,
+            );
+        }
+    }
+    crate::forward::predict::logits_to_predictions_pub(weights, h, tokenizer, 5, 1.0)
 }
 
 fn predict_q4k_timed(

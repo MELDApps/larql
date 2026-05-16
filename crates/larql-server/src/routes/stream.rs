@@ -700,6 +700,7 @@ mod tests {
             ffn_l2_cache: FfnL2Cache::new(1),
             layer_latency_tracker: std::sync::Arc::new(crate::metrics::LayerLatencyTracker::new()),
             requests_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            requests_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expert_filter: None,
             unit_filter: None,
             moe_remote: None,

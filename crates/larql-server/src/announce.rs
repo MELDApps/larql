@@ -51,6 +51,10 @@ pub struct AnnounceConfig {
     pub latency_tracker: Arc<LayerLatencyTracker>,
     /// Active request counter — used for drain (GT6) and heartbeat.requests_in_flight.
     pub requests_in_flight: Arc<std::sync::atomic::AtomicU32>,
+    /// Cumulative request counter — diffed across the heartbeat interval
+    /// to populate `HeartbeatMsg.req_per_sec`, which the router's
+    /// hot-shard rebalancer reads to detect saturated shards.
+    pub requests_total: Arc<std::sync::atomic::AtomicU64>,
     /// GT6: when set, after `UnassignMsg` + drain + `DroppingMsg`, the server
     /// re-enters Mode B on the same gRPC stream using this config so the
     /// router can immediately reassign it to a different gap.
@@ -208,14 +212,25 @@ fn announce_message(cfg: &AnnounceConfig) -> ServerMessage {
 fn heartbeat_message(
     tracker: &LayerLatencyTracker,
     requests_in_flight: &std::sync::atomic::AtomicU32,
+    requests_total: &std::sync::atomic::AtomicU64,
+    last_total: &mut u64,
+    interval: Duration,
 ) -> ServerMessage {
     use std::sync::atomic::Ordering;
+    let now_total = requests_total.load(Ordering::Relaxed);
+    // saturating_sub guards against a counter reset (defensive — the
+    // counter is monotonic in practice; this just keeps the rate ≥ 0).
+    let delta = now_total.saturating_sub(*last_total);
+    *last_total = now_total;
+    let secs = interval.as_secs_f32().max(f32::EPSILON);
+    let req_per_sec = delta as f32 / secs;
     ServerMessage {
         payload: Some(ServerPayload::Heartbeat(HeartbeatMsg {
             cpu_pct: 0.0,
             ram_used: 0,
             requests_in_flight: requests_in_flight.load(Ordering::Relaxed),
             layer_stats: tracker.snapshot(),
+            req_per_sec,
         })),
     }
 }
@@ -267,9 +282,7 @@ async fn connect_grid_channel(
     if join_url.starts_with("quic://") {
         #[cfg(feature = "quic")]
         {
-            use larql_router_protocol::transport::quic::{
-                client_endpoint, connect_grpc_channel,
-            };
+            use larql_router_protocol::transport::quic::{client_endpoint, connect_grpc_channel};
 
             // Parse "quic://host:port" → (host, SocketAddr). We strip the
             // scheme by hand because tonic's Uri parser rejects schemes it
@@ -324,8 +337,7 @@ async fn connect_grid_channel(
 pub async fn try_once(
     cfg: &AnnounceConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let channel =
-        connect_grid_channel(&cfg.join_url, cfg.quic_cert_fingerprint.as_deref()).await?;
+    let channel = connect_grid_channel(&cfg.join_url, cfg.quic_cert_fingerprint.as_deref()).await?;
 
     // Inject the grid key into every outgoing RPC as "Authorization: Bearer <key>".
     let bearer = grid_bearer_value(cfg.grid_key.as_deref())?;
@@ -351,11 +363,23 @@ pub async fn try_once(
     let tx_hb = tx.clone();
     let tracker = cfg.latency_tracker.clone();
     let rif = cfg.requests_in_flight.clone();
+    let req_total = cfg.requests_total.clone();
     let hb_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        // First tick fires immediately; seed the running total so the
+        // initial heartbeat reports the rate over the first window
+        // rather than counting all requests served before announce.
+        let mut last_total = req_total.load(std::sync::atomic::Ordering::Relaxed);
         loop {
             interval.tick().await;
-            if tx_hb.send(heartbeat_message(&tracker, &rif)).await.is_err() {
+            let msg = heartbeat_message(
+                &tracker,
+                &rif,
+                &req_total,
+                &mut last_total,
+                HEARTBEAT_INTERVAL,
+            );
+            if tx_hb.send(msg).await.is_err() {
                 break;
             }
         }
@@ -427,8 +451,7 @@ pub async fn try_once(
 async fn try_once_available(
     cfg: &AvailableConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let channel =
-        connect_grid_channel(&cfg.join_url, cfg.quic_cert_fingerprint.as_deref()).await?;
+    let channel = connect_grid_channel(&cfg.join_url, cfg.quic_cert_fingerprint.as_deref()).await?;
 
     let bearer = grid_bearer_value(cfg.grid_key.as_deref())?;
     let mut client =
@@ -558,6 +581,7 @@ mod tests {
             vindex_hash: "abc123".into(),
             latency_tracker: Arc::new(LayerLatencyTracker::new()),
             requests_in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            requests_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             available_after_drain: None,
             quic_cert_fingerprint: None,
         }
@@ -600,7 +624,9 @@ mod tests {
     fn heartbeat_message_uses_zeroed_metrics() {
         let tracker = LayerLatencyTracker::new();
         let rif = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let msg = heartbeat_message(&tracker, &rif);
+        let total = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut last = 0u64;
+        let msg = heartbeat_message(&tracker, &rif, &total, &mut last, Duration::from_secs(10));
         let Some(ServerPayload::Heartbeat(heartbeat)) = msg.payload else {
             panic!("expected heartbeat payload");
         };
@@ -608,6 +634,7 @@ mod tests {
         assert_eq!(heartbeat.ram_used, 0);
         assert_eq!(heartbeat.requests_in_flight, 0);
         assert!(heartbeat.layer_stats.is_empty());
+        assert_eq!(heartbeat.req_per_sec, 0.0);
     }
 
     #[test]
@@ -616,13 +643,64 @@ mod tests {
         tracker.record(5, 3.0);
         tracker.record(5, 5.0);
         let rif = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let msg = heartbeat_message(&tracker, &rif);
+        let total = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut last = 0u64;
+        let msg = heartbeat_message(&tracker, &rif, &total, &mut last, Duration::from_secs(10));
         let Some(ServerPayload::Heartbeat(hb)) = msg.payload else {
             panic!("expected heartbeat");
         };
         assert_eq!(hb.layer_stats.len(), 1);
         assert_eq!(hb.layer_stats[0].layer, 5);
         assert!(hb.layer_stats[0].avg_ms > 0.0);
+    }
+
+    #[test]
+    fn heartbeat_computes_req_per_sec_from_counter_delta() {
+        let tracker = LayerLatencyTracker::new();
+        let rif = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let total = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut last = 0u64;
+        // 50 requests over a 10 s interval = 5 req/s.
+        total.store(50, std::sync::atomic::Ordering::Relaxed);
+        let msg = heartbeat_message(&tracker, &rif, &total, &mut last, Duration::from_secs(10));
+        let Some(ServerPayload::Heartbeat(hb)) = msg.payload else {
+            panic!("expected heartbeat");
+        };
+        assert!(
+            (hb.req_per_sec - 5.0).abs() < 0.001,
+            "got {}",
+            hb.req_per_sec
+        );
+        assert_eq!(last, 50, "last sample should advance");
+
+        // Second sample: another 30 requests in the same window → 3 req/s.
+        total.store(80, std::sync::atomic::Ordering::Relaxed);
+        let msg2 = heartbeat_message(&tracker, &rif, &total, &mut last, Duration::from_secs(10));
+        let Some(ServerPayload::Heartbeat(hb2)) = msg2.payload else {
+            panic!("expected heartbeat");
+        };
+        assert!(
+            (hb2.req_per_sec - 3.0).abs() < 0.001,
+            "got {}",
+            hb2.req_per_sec
+        );
+    }
+
+    #[test]
+    fn heartbeat_rate_clamps_to_zero_on_counter_reset() {
+        // saturating_sub guards against a counter going backwards. The
+        // counter is monotonic in production; this just prevents an
+        // underflow spike if a deployer pulls the rug.
+        let tracker = LayerLatencyTracker::new();
+        let rif = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let total = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut last = 100u64;
+        let msg = heartbeat_message(&tracker, &rif, &total, &mut last, Duration::from_secs(10));
+        let Some(ServerPayload::Heartbeat(hb)) = msg.payload else {
+            panic!("expected heartbeat");
+        };
+        assert_eq!(hb.req_per_sec, 0.0);
+        assert_eq!(last, 0, "last sample should track the reset counter");
     }
 
     #[test]
@@ -644,13 +722,9 @@ mod tests {
 
     #[test]
     fn build_available_after_drain_passes_through_overrides() {
-        let cfg = build_available_after_drain(
-            Some(1),
-            "http://srv",
-            Some("/mnt/shards"),
-            Some("secret"),
-        )
-        .unwrap();
+        let cfg =
+            build_available_after_drain(Some(1), "http://srv", Some("/mnt/shards"), Some("secret"))
+                .unwrap();
         assert_eq!(cfg.store_path, "/mnt/shards");
         assert_eq!(cfg.grid_key.as_deref(), Some("secret"));
     }

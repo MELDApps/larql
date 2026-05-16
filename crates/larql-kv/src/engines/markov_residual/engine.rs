@@ -7,8 +7,9 @@ use ndarray::Array2;
 use super::compute::{rs_decode_step, rs_decode_step_profiled, rs_prefill};
 use super::q4k::{ensure_attn_tensors_dequantised, rs_decode_step_walk, rs_prefill_walk};
 use super::store::RsStore;
-use crate::profiler::{DecodeStageSummary, EngineProfiler};
-use crate::{EngineInfo, KvEngine};
+use crate::profiler::EngineProfiler;
+use crate::{DecodeStageSummary, EngineInfo, KvEngine};
+use larql_inference::ffn::FfnBackend;
 use larql_inference::model::ModelWeights;
 
 pub struct MarkovResidualEngine {
@@ -68,14 +69,24 @@ impl KvEngine for MarkovResidualEngine {
         }
     }
 
-    fn prefill(&mut self, weights: &ModelWeights, token_ids: &[u32]) -> Option<Array2<f32>> {
+    fn prefill(
+        &mut self,
+        weights: &ModelWeights,
+        _ffn: &dyn FfnBackend,
+        token_ids: &[u32],
+    ) -> Option<Array2<f32>> {
         let result = rs_prefill(weights, token_ids, self.window_size, self.backend.as_ref());
         let hidden = result.hidden.clone();
         self.store = Some(result.store);
         Some(hidden)
     }
 
-    fn decode_step(&mut self, weights: &ModelWeights, token_id: u32) -> Option<Array2<f32>> {
+    fn decode_step(
+        &mut self,
+        weights: &ModelWeights,
+        _ffn: &dyn FfnBackend,
+        token_id: u32,
+    ) -> Option<Array2<f32>> {
         let rs = self.store.take()?;
         let (hidden, new_rs) = if self.profiling {
             rs_decode_step_profiled(
@@ -114,6 +125,7 @@ impl KvEngine for MarkovResidualEngine {
     fn prefill_q4k(
         &mut self,
         weights: &mut ModelWeights,
+        _ffn: &dyn FfnBackend,
         index: &VectorIndex,
         token_ids: &[u32],
         backend: &dyn ComputeBackend,
@@ -135,6 +147,7 @@ impl KvEngine for MarkovResidualEngine {
     fn decode_step_q4k(
         &mut self,
         weights: &mut ModelWeights,
+        _ffn: &dyn FfnBackend,
         index: &VectorIndex,
         token_id: u32,
         backend: &dyn ComputeBackend,
@@ -157,6 +170,7 @@ impl KvEngine for MarkovResidualEngine {
 mod tests {
     use super::*;
     use crate::KvEngine;
+    use larql_inference::ffn::WeightFfn;
     use larql_inference::forward::hidden_to_raw_logits;
     use larql_inference::test_utils::make_test_weights;
 
@@ -202,8 +216,11 @@ mod tests {
     #[test]
     fn prefill_stores_residuals_for_all_layers() {
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = MarkovResidualEngine::new(None);
-        let h = engine.prefill(&weights, &[0u32, 1, 2]).expect("prefill");
+        let h = engine
+            .prefill(&weights, &ffn, &[0u32, 1, 2])
+            .expect("prefill");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(
             engine.memory_bytes() > 0,
@@ -214,9 +231,10 @@ mod tests {
     #[test]
     fn decode_step_produces_finite_logits() {
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = MarkovResidualEngine::new(None);
-        engine.prefill(&weights, &[0u32, 1]).expect("prefill");
-        let h = engine.decode_step(&weights, 2).expect("decode");
+        engine.prefill(&weights, &ffn, &[0u32, 1]).expect("prefill");
+        let h = engine.decode_step(&weights, &ffn, 2).expect("decode");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(hidden_to_raw_logits(&weights, &h)
             .iter()
@@ -226,12 +244,13 @@ mod tests {
     #[test]
     fn memory_grows_with_each_decode_step() {
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = MarkovResidualEngine::new(None);
-        engine.prefill(&weights, &[0u32]).expect("prefill");
+        engine.prefill(&weights, &ffn, &[0u32]).expect("prefill");
         let mem_after_prefill = engine.memory_bytes();
-        engine.decode_step(&weights, 1).expect("decode 1");
+        engine.decode_step(&weights, &ffn, 1).expect("decode 1");
         let mem_after_1 = engine.memory_bytes();
-        engine.decode_step(&weights, 2).expect("decode 2");
+        engine.decode_step(&weights, &ffn, 2).expect("decode 2");
         let mem_after_2 = engine.memory_bytes();
         assert!(
             mem_after_1 > mem_after_prefill,
@@ -243,9 +262,10 @@ mod tests {
     #[test]
     fn window_clipping_limits_hot_store() {
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = MarkovResidualEngine::new(Some(2)); // window=2 tokens
         engine
-            .prefill(&weights, &[0u32, 1, 2, 3, 4])
+            .prefill(&weights, &ffn, &[0u32, 1, 2, 3, 4])
             .expect("prefill 5 tokens");
         // After clipping, hot store ≤ window
         assert!(
@@ -263,10 +283,13 @@ mod tests {
     #[test]
     fn multiple_decode_steps_produce_consistent_shapes() {
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = MarkovResidualEngine::new(None);
-        engine.prefill(&weights, &[0u32]).expect("prefill");
+        engine.prefill(&weights, &ffn, &[0u32]).expect("prefill");
         for step in 0..3 {
-            let h = engine.decode_step(&weights, step as u32).expect("decode");
+            let h = engine
+                .decode_step(&weights, &ffn, step as u32)
+                .expect("decode");
             assert_eq!(h.shape(), &[1, weights.hidden_size], "step {step}");
         }
     }
@@ -276,12 +299,13 @@ mod tests {
     #[test]
     fn with_profiling_enables_profiling_branch() {
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = MarkovResidualEngine::new(None).with_profiling(true);
         // No decode yet → stage_summary returns None even with profiling on.
         assert!(engine.stage_summary().is_none());
 
-        engine.prefill(&weights, &[0u32, 1]).expect("prefill");
-        engine.decode_step(&weights, 2).expect("decode");
+        engine.prefill(&weights, &ffn, &[0u32, 1]).expect("prefill");
+        engine.decode_step(&weights, &ffn, 2).expect("decode");
 
         let summary = engine.stage_summary().expect("profiling summary");
         assert_eq!(summary.engine, "markov-rs");
@@ -292,9 +316,10 @@ mod tests {
     #[test]
     fn stage_summary_none_without_profiling() {
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = MarkovResidualEngine::new(None); // profiling: false
-        engine.prefill(&weights, &[0u32]).expect("prefill");
-        engine.decode_step(&weights, 1).expect("decode");
+        engine.prefill(&weights, &ffn, &[0u32]).expect("prefill");
+        engine.decode_step(&weights, &ffn, 1).expect("decode");
         assert!(
             engine.stage_summary().is_none(),
             "stage_summary must be None when profiling is disabled"
@@ -306,12 +331,13 @@ mod tests {
         // Two engines: one profiled, one not. Both should yield hidden states
         // of the same shape after the same prefill+decode sequence.
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut profiled = MarkovResidualEngine::new(None).with_profiling(true);
         let mut plain = MarkovResidualEngine::new(None);
-        profiled.prefill(&weights, &[0u32, 1]).unwrap();
-        plain.prefill(&weights, &[0u32, 1]).unwrap();
-        let h_p = profiled.decode_step(&weights, 2).unwrap();
-        let h_n = plain.decode_step(&weights, 2).unwrap();
+        profiled.prefill(&weights, &ffn, &[0u32, 1]).unwrap();
+        plain.prefill(&weights, &ffn, &[0u32, 1]).unwrap();
+        let h_p = profiled.decode_step(&weights, &ffn, 2).unwrap();
+        let h_n = plain.decode_step(&weights, &ffn, 2).unwrap();
         assert_eq!(h_p.shape(), h_n.shape());
     }
 
@@ -324,12 +350,16 @@ mod tests {
 
     #[test]
     fn prefill_q4k_cpu_fallback_runs_walk_path() {
+        use larql_inference::ffn::NullFfn;
         let mut weights = make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let backend = larql_compute::cpu_backend();
+        // `NullFfn` satisfies the trait without borrowing `weights`, which is
+        // `&mut` here. The engine ignores the FFN parameter on this path.
+        let ffn = NullFfn;
         let mut engine = MarkovResidualEngine::new(None);
         let h = engine
-            .prefill_q4k(&mut weights, &index, &[0u32, 1, 2], &*backend)
+            .prefill_q4k(&mut weights, &ffn, &index, &[0u32, 1, 2], &*backend)
             .expect("prefill_q4k cpu fallback");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(engine.memory_bytes() > 0);
@@ -337,16 +367,18 @@ mod tests {
 
     #[test]
     fn decode_step_q4k_cpu_fallback_extends_store() {
+        use larql_inference::ffn::NullFfn;
         let mut weights = make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let backend = larql_compute::cpu_backend();
+        let ffn = NullFfn;
         let mut engine = MarkovResidualEngine::new(None);
         engine
-            .prefill_q4k(&mut weights, &index, &[0u32, 1], &*backend)
+            .prefill_q4k(&mut weights, &ffn, &index, &[0u32, 1], &*backend)
             .expect("prefill_q4k");
         let mem_before = engine.memory_bytes();
         let h = engine
-            .decode_step_q4k(&mut weights, &index, 2, &*backend)
+            .decode_step_q4k(&mut weights, &ffn, &index, 2, &*backend)
             .expect("decode_step_q4k cpu fallback");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(

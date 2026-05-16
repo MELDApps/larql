@@ -101,6 +101,22 @@ impl QuantMatVec for CpuBackend {
         Some(ops::q6k_matvec::dispatch(q6k_data, x, num_rows, hidden))
     }
 
+    fn q4k_dual_matvec(
+        &self,
+        q4k_a: &[u8],
+        q4k_b: &[u8],
+        x: &[f32],
+        num_rows: usize,
+        hidden: usize,
+    ) -> Option<(Vec<f32>, Vec<f32>)> {
+        let mut out_a = vec![0.0f32; num_rows];
+        let mut out_b = vec![0.0f32; num_rows];
+        ops::q4_common::q4k_dual_matvec_into(
+            &mut out_a, &mut out_b, x, q4k_a, q4k_b, num_rows, hidden,
+        );
+        Some((out_a, out_b))
+    }
+
     fn has_q4(&self) -> bool {
         true
     }

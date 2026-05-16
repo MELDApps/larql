@@ -20,13 +20,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use larql_router_protocol::transport::quic::{
-    self_signed_tls, server_endpoint, client_endpoint, connect_grpc_channel, spawn_accept_loop,
+    client_endpoint, connect_grpc_channel, self_signed_tls, server_endpoint, spawn_accept_loop,
     QuicConnectInfo,
 };
 use larql_router_protocol::{
     grid_service_server::{GridService, GridServiceServer},
-    AckMsg, AnnounceMsg, GridServiceClient, RouterMessage, RouterPayload, ServerMessage,
-    ServerPayload, StatusRequest, StatusResponse,
+    AckMsg, AdminAck, AnnounceMsg, AssignRangeRequest, DrainRequest, GridServiceClient,
+    RouterMessage, RouterPayload, ServerMessage, ServerPayload, StatusRequest, StatusResponse,
 };
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
@@ -83,6 +83,22 @@ impl GridService for StubService {
         _req: Request<StatusRequest>,
     ) -> Result<Response<StatusResponse>, Status> {
         Ok(Response::new(StatusResponse::default()))
+    }
+
+    // Phase 5 admin RPCs — the QUIC roundtrip test doesn't exercise them,
+    // so stub-acknowledge so this file keeps compiling against the trait.
+    async fn drain_server(
+        &self,
+        _req: Request<DrainRequest>,
+    ) -> Result<Response<AdminAck>, Status> {
+        Ok(Response::new(AdminAck::default()))
+    }
+
+    async fn assign_range(
+        &self,
+        _req: Request<AssignRangeRequest>,
+    ) -> Result<Response<AdminAck>, Status> {
+        Ok(Response::new(AdminAck::default()))
     }
 }
 
@@ -147,8 +163,8 @@ async fn quic_round_trip_announce_to_ack() {
     // Client endpoint binds an ephemeral port and pins the server cert by
     // fingerprint.
     let client_bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let endpoint = client_endpoint(client_bind, Some(tls.fingerprint.clone()))
-        .expect("client_endpoint");
+    let endpoint =
+        client_endpoint(client_bind, Some(tls.fingerprint.clone())).expect("client_endpoint");
 
     let (_conn, channel) = connect_grpc_channel(&endpoint, server_addr, "router")
         .await
@@ -229,4 +245,44 @@ async fn quic_status_unary_call_succeeds() {
     // The stub returns Default::default(); just confirm we got *a*
     // successful response over QUIC.
     assert!(resp.is_ok(), "Status over QUIC: {:?}", resp.err());
+}
+
+/// LAN-only path: client connects with no fingerprint so the
+/// AcceptAny verifier is wired into the TLS config and its
+/// verify_server_cert / verify_tls13_signature run during the real
+/// handshake. Pairs with the unit tests that exercise AcceptAny's
+/// pure methods directly.
+#[tokio::test]
+async fn quic_round_trip_with_skip_verify_uses_accept_any() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
+    let tls = self_signed_tls("router").expect("rcgen");
+    let stub = Arc::new(StubService::default());
+    let server_state = stub.clone();
+
+    let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let server_addr = spawn_quic_server(
+        bind,
+        tls.cert_pem.clone(),
+        tls.key_pem.clone(),
+        server_state,
+    )
+    .await;
+
+    // `None` → AcceptAny verifier; the cert hashes are never compared.
+    let client_bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let endpoint = client_endpoint(client_bind, None).expect("client_endpoint");
+    let (_conn, channel) = connect_grpc_channel(&endpoint, server_addr, "router")
+        .await
+        .expect("connect_grpc_channel with skip_verify");
+
+    let mut client = GridServiceClient::new(channel);
+    let resp = client.status(StatusRequest::default()).await;
+    assert!(
+        resp.is_ok(),
+        "Status over QUIC with skip-verify: {:?}",
+        resp.err()
+    );
 }

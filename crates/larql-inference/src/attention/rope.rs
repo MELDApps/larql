@@ -5,6 +5,41 @@
 
 use ndarray::Array2;
 
+/// Re-export of the parameter struct that lives in `larql-models` so it
+/// can be parsed from `config.json` without cross-crate dependency
+/// inversion. The math (`apply_llama3_inv_freq` below) is the inference-
+/// side concern.
+pub use larql_models::Llama3RopeScaling;
+
+/// Compute wavelength-adjusted `inv_freq[i]` for each rotary half-pair
+/// from the standard `1 / base^(2i/d)` baseline. Mirrors HF's
+/// `_compute_llama3_parameters` in `modeling_rope_utils.py`:
+///
+/// - `wavelen[i] = 2π / inv_freq[i]`
+/// - if `wavelen < high_freq_wavelen` (fast rotation): unchanged
+/// - if `wavelen > low_freq_wavelen`  (slow rotation): divided by `factor`
+/// - otherwise: smooth interpolation between the two regimes
+pub fn apply_llama3_inv_freq(scaling: &Llama3RopeScaling, inv_freq: &[f64]) -> Vec<f64> {
+    let low_freq_wavelen = scaling.original_max_position_embeddings / scaling.low_freq_factor;
+    let high_freq_wavelen = scaling.original_max_position_embeddings / scaling.high_freq_factor;
+    inv_freq
+        .iter()
+        .map(|&inv| {
+            let wavelen = std::f64::consts::TAU / inv;
+            if wavelen < high_freq_wavelen {
+                inv
+            } else if wavelen > low_freq_wavelen {
+                inv / scaling.factor
+            } else {
+                let smooth = (scaling.original_max_position_embeddings / wavelen
+                    - scaling.low_freq_factor)
+                    / (scaling.high_freq_factor - scaling.low_freq_factor);
+                (1.0 - smooth) * inv / scaling.factor + smooth * inv
+            }
+        })
+        .collect()
+}
+
 /// Apply full RoPE to Q or K vectors.
 /// x: (seq_len, num_heads * head_dim)
 pub fn apply_rope(
@@ -41,21 +76,82 @@ pub fn apply_rope_partial_at(
     fraction: f64,
     position_offset: usize,
 ) -> Array2<f32> {
+    apply_rope_partial_at_scaled(
+        x,
+        num_heads,
+        head_dim,
+        rope_base,
+        fraction,
+        position_offset,
+        1.0,
+    )
+}
+
+/// Same as [`apply_rope_partial_at`] but divides the position by
+/// `position_divisor` before computing phase. Matches HF
+/// `rope_scaling = {rope_type: linear, factor: N}` applied to a specific
+/// layer-type (Gemma 3 applies it only on global / full-attention layers,
+/// not on sliding-attention layers — see `Gemma3TextConfig.rope_scaling`).
+pub fn apply_rope_partial_at_scaled(
+    x: &Array2<f32>,
+    num_heads: usize,
+    head_dim: usize,
+    rope_base: f64,
+    fraction: f64,
+    position_offset: usize,
+    position_divisor: f64,
+) -> Array2<f32> {
+    apply_rope_partial_at_full(
+        x,
+        num_heads,
+        head_dim,
+        rope_base,
+        fraction,
+        position_offset,
+        position_divisor,
+        None,
+    )
+}
+
+/// Most general RoPE entry point. Adds optional `llama3_scaling`: when
+/// present, replaces the standard `1 / base^(2i/rotary_dim)` frequencies
+/// with HF's `llama3` wavelength-dependent variant. `position_divisor` and
+/// `llama3_scaling` compose independently — the divisor scales the
+/// position, llama3 scales the per-channel frequency.
+pub fn apply_rope_partial_at_full(
+    x: &Array2<f32>,
+    num_heads: usize,
+    head_dim: usize,
+    rope_base: f64,
+    fraction: f64,
+    position_offset: usize,
+    position_divisor: f64,
+    llama3_scaling: Option<Llama3RopeScaling>,
+) -> Array2<f32> {
     let seq_len = x.shape()[0];
     let mut out = x.clone();
 
     let rotary_dim = ((head_dim as f64 * fraction) as usize).max(2);
     let half_rotary = rotary_dim / 2;
-    let inv_freq: Vec<f64> = (0..half_rotary)
+    let base_inv_freq: Vec<f64> = (0..half_rotary)
         .map(|i| 1.0 / rope_base.powf(2.0 * i as f64 / rotary_dim as f64))
         .collect();
+    let inv_freq: Vec<f64> = match llama3_scaling {
+        Some(scaling) => apply_llama3_inv_freq(&scaling, &base_inv_freq),
+        None => base_inv_freq,
+    };
+    let divisor = if position_divisor > 0.0 {
+        position_divisor
+    } else {
+        1.0
+    };
 
     for row in 0..seq_len {
-        let pos = position_offset + row;
+        let pos = (position_offset + row) as f64 / divisor;
         for h in 0..num_heads {
             let offset = h * head_dim;
             for i in 0..half_rotary {
-                let theta = pos as f64 * inv_freq[i];
+                let theta = pos * inv_freq[i];
                 let cos_t = theta.cos() as f32;
                 let sin_t = theta.sin() as f32;
 

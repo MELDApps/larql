@@ -3,7 +3,13 @@
 //! Single source of truth for extracting per-layer architecture parameters
 //! from larql-models and wiring them into larql-compute's FullPipelineLayer.
 //! Both GPU and CPU paths use this — no duplicated param extraction.
+//!
+//! Per-layer override resolution (env vars vs arch defaults) lives in
+//! [`crate::forward_overrides`]; this module consumes those helpers.
 
+use crate::forward_overrides::{
+    effective_rope_base_for_layer, layer_forced_global,
+};
 use crate::model::ModelWeights;
 use larql_compute::{
     FullPipelineLayer, MoeLayerWeights, MoeRoutingPolicy, MoeWeightLayout, QuantFormat, QuantWeight,
@@ -54,7 +60,8 @@ pub fn build_arch_params<'a>(
     } else {
         (layer_hd as f64 * rotary_frac) as usize
     };
-    let sw = if arch.is_sliding_window_layer(layer) {
+    let force_global = layer_forced_global(layer);
+    let sw = if !force_global && arch.is_sliding_window_layer(layer) {
         arch.sliding_window_size().unwrap_or(0)
     } else {
         0
@@ -111,7 +118,7 @@ pub fn build_arch_params<'a>(
         head_dim: layer_hd,
         num_q_heads: layer_nq,
         num_kv_heads: layer_nkv,
-        rope_base: arch.rope_base_for_layer(layer) as f32,
+        rope_base: effective_rope_base_for_layer(arch, layer) as f32,
         rotary_dim,
         sliding_window: sw,
         has_v_norm: arch.has_v_norm(),

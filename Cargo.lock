@@ -2086,6 +2086,7 @@ dependencies = [
  "memmap2",
  "minijinja",
  "ndarray",
+ "rayon",
  "reqwest",
  "safetensors",
  "serde",

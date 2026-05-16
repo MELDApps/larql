@@ -23,7 +23,7 @@ use larql_inference::attention::SharedKV;
 use larql_inference::attention::{
     run_attention_block_decode_step_backend, run_attention_with_kv_backend,
 };
-use larql_inference::ffn::BackendFfn;
+use larql_inference::ffn::{BackendFfn, FfnBackend};
 use larql_inference::forward::{embed_tokens_pub, run_ffn};
 use larql_inference::model::ModelWeights;
 use larql_inference::vindex::{WalkFfn, WalkFfnConfig};
@@ -219,7 +219,12 @@ impl KvEngine for TurboQuantEngine {
         }
     }
 
-    fn prefill(&mut self, weights: &ModelWeights, token_ids: &[u32]) -> Option<Array2<f32>> {
+    fn prefill(
+        &mut self,
+        weights: &ModelWeights,
+        _ffn: &dyn FfnBackend,
+        token_ids: &[u32],
+    ) -> Option<Array2<f32>> {
         let num_layers = weights.num_layers;
         let be = Some(self.backend.as_ref());
         let mut h = embed_tokens_pub(weights, token_ids);
@@ -242,7 +247,12 @@ impl KvEngine for TurboQuantEngine {
         Some(last_row(&h))
     }
 
-    fn decode_step(&mut self, weights: &ModelWeights, token_id: u32) -> Option<Array2<f32>> {
+    fn decode_step(
+        &mut self,
+        weights: &ModelWeights,
+        _ffn: &dyn FfnBackend,
+        token_id: u32,
+    ) -> Option<Array2<f32>> {
         let num_layers = weights.num_layers;
         let abs_position = self.abs_position;
         let mut h = embed_tokens_pub(weights, &[token_id]);
@@ -296,6 +306,7 @@ impl KvEngine for TurboQuantEngine {
     fn prefill_q4k(
         &mut self,
         weights: &mut ModelWeights,
+        _ffn: &dyn FfnBackend,
         index: &VectorIndex,
         token_ids: &[u32],
         backend: &dyn ComputeBackend,
@@ -313,6 +324,7 @@ impl KvEngine for TurboQuantEngine {
     fn decode_step_q4k(
         &mut self,
         weights: &mut ModelWeights,
+        _ffn: &dyn FfnBackend,
         index: &VectorIndex,
         token_id: u32,
         backend: &dyn ComputeBackend,
@@ -627,16 +639,18 @@ mod tests {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+    use larql_inference::ffn::WeightFfn;
     use larql_inference::forward::hidden_to_raw_logits;
     use larql_inference::test_utils::make_test_weights;
 
     #[test]
     fn prefill_compresses_kv_for_all_layers() {
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = TurboQuantEngine::new(4);
         assert_eq!(engine.memory_bytes(), 0);
         let h = engine
-            .prefill(&weights, &[0u32, 1, 2])
+            .prefill(&weights, &ffn, &[0u32, 1, 2])
             .expect("prefill failed");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert_eq!(
@@ -650,11 +664,12 @@ mod integration_tests {
     #[test]
     fn decode_step_grows_compressed_cache() {
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = TurboQuantEngine::new(4);
-        engine.prefill(&weights, &[0u32]).expect("prefill");
+        engine.prefill(&weights, &ffn, &[0u32]).expect("prefill");
         let mem_before = engine.memory_bytes();
 
-        engine.decode_step(&weights, 1).expect("decode_step");
+        engine.decode_step(&weights, &ffn, 1).expect("decode_step");
         // After decode: K/V cache has one more entry per layer → more compressed bytes
         assert!(
             engine.memory_bytes() > mem_before,
@@ -665,12 +680,13 @@ mod integration_tests {
     #[test]
     fn logits_finite_after_prefill_and_decode() {
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = TurboQuantEngine::new(4);
-        let h_pre = engine.prefill(&weights, &[0u32, 1]).expect("prefill");
+        let h_pre = engine.prefill(&weights, &ffn, &[0u32, 1]).expect("prefill");
         assert!(hidden_to_raw_logits(&weights, &h_pre)
             .iter()
             .all(|v| v.is_finite()));
-        let h_dec = engine.decode_step(&weights, 2).expect("decode");
+        let h_dec = engine.decode_step(&weights, &ffn, 2).expect("decode");
         assert!(hidden_to_raw_logits(&weights, &h_dec)
             .iter()
             .all(|v| v.is_finite()));
@@ -679,13 +695,18 @@ mod integration_tests {
     #[test]
     fn three_bit_engine_also_works() {
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = TurboQuantEngine::new(3);
-        let h = engine.prefill(&weights, &[0u32]).expect("3-bit prefill");
+        let h = engine
+            .prefill(&weights, &ffn, &[0u32])
+            .expect("3-bit prefill");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         // 3-bit uses fewer bytes per compressed vector
         let mem3 = engine.memory_bytes();
         let mut engine4 = TurboQuantEngine::new(4);
-        engine4.prefill(&weights, &[0u32]).expect("4-bit prefill");
+        engine4
+            .prefill(&weights, &ffn, &[0u32])
+            .expect("4-bit prefill");
         assert!(
             mem3 < engine4.memory_bytes(),
             "3-bit should use less memory than 4-bit"

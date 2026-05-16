@@ -27,6 +27,7 @@ use super::token_archive::TokenArchive;
 use crate::engines::markov_residual::ensure_attn_tensors_dequantised;
 use crate::{EngineInfo, KvEngine};
 use larql_inference::attention::SharedKV;
+use larql_inference::ffn::FfnBackend;
 use larql_inference::layer_graph::pipeline_layer::DEFAULT_GPU_KV_CACHE_MAX_SEQ;
 use larql_inference::model::ModelWeights;
 
@@ -322,12 +323,22 @@ impl KvEngine for UnlimitedContextEngine {
         }
     }
 
-    fn prefill(&mut self, weights: &ModelWeights, token_ids: &[u32]) -> Option<Array2<f32>> {
+    fn prefill(
+        &mut self,
+        weights: &ModelWeights,
+        _ffn: &dyn FfnBackend,
+        token_ids: &[u32],
+    ) -> Option<Array2<f32>> {
         self.process(weights, token_ids)?;
         self.last_hidden.clone()
     }
 
-    fn decode_step(&mut self, weights: &ModelWeights, token_id: u32) -> Option<Array2<f32>> {
+    fn decode_step(
+        &mut self,
+        weights: &ModelWeights,
+        _ffn: &dyn FfnBackend,
+        token_id: u32,
+    ) -> Option<Array2<f32>> {
         self.process(weights, &[token_id])?;
         self.last_hidden.clone()
     }
@@ -353,6 +364,7 @@ impl KvEngine for UnlimitedContextEngine {
     fn prefill_q4k(
         &mut self,
         weights: &mut ModelWeights,
+        _ffn: &dyn FfnBackend,
         index: &VectorIndex,
         token_ids: &[u32],
         backend: &dyn ComputeBackend,
@@ -372,6 +384,7 @@ impl KvEngine for UnlimitedContextEngine {
     fn decode_step_q4k(
         &mut self,
         weights: &mut ModelWeights,
+        _ffn: &dyn FfnBackend,
         index: &VectorIndex,
         token_id: u32,
         backend: &dyn ComputeBackend,
@@ -559,11 +572,13 @@ mod tests {
 
     #[test]
     fn prefill_returns_hidden_state() {
+        use larql_inference::ffn::WeightFfn;
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = UnlimitedContextEngine::new(512);
         let h = engine
-            .prefill(&weights, &[0u32, 1, 2])
+            .prefill(&weights, &ffn, &[0u32, 1, 2])
             .expect("prefill failed");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(
@@ -574,11 +589,13 @@ mod tests {
 
     #[test]
     fn decode_step_returns_hidden_state() {
+        use larql_inference::ffn::WeightFfn;
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = UnlimitedContextEngine::new(512);
-        engine.prefill(&weights, &[0u32]).expect("prefill");
-        let h = engine.decode_step(&weights, 1).expect("decode_step");
+        engine.prefill(&weights, &ffn, &[0u32]).expect("prefill");
+        let h = engine.decode_step(&weights, &ffn, 1).expect("decode_step");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(h.iter().all(|v| v.is_finite()));
     }
@@ -659,21 +676,27 @@ mod tests {
 
     #[test]
     fn memory_bytes_nonzero_after_prefill() {
+        use larql_inference::ffn::WeightFfn;
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = UnlimitedContextEngine::new(512);
         assert_eq!(engine.memory_bytes(), 0);
-        engine.prefill(&weights, &[0u32, 1, 2]).expect("prefill");
+        engine
+            .prefill(&weights, &ffn, &[0u32, 1, 2])
+            .expect("prefill");
         assert!(engine.memory_bytes() > 0);
     }
 
     #[test]
     fn logits_from_unlimited_context_are_finite() {
+        use larql_inference::ffn::WeightFfn;
         use larql_inference::forward::hidden_to_raw_logits;
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = UnlimitedContextEngine::new(512);
-        let h = engine.prefill(&weights, &[0u32, 1]).expect("prefill");
+        let h = engine.prefill(&weights, &ffn, &[0u32, 1]).expect("prefill");
         let logits = hidden_to_raw_logits(&weights, &h);
         assert!(
             logits.iter().all(|v| v.is_finite()),

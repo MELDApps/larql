@@ -1044,60 +1044,46 @@ fn generate_stream(
     // available. Real GPU wins require either the Q4K `full_pipeline`
     // (already wired via `--metal` on Q4K vindexes) or batched decode.
     let backend = larql_compute::default_backend();
+    // Captured for the verbose label after `backend` is consumed by the
+    // engine builder.
+    let backend_name = backend.name().to_string();
 
-    let (generated, label) = match args.kv_cache {
-        KvCacheKind::Standard | KvCacheKind::MarkovBounded => {
-            let window = if args.kv_cache == KvCacheKind::MarkovBounded && args.context_window > 0 {
-                Some(args.context_window)
-            } else {
-                None
-            };
-            let g = larql_inference::forward::generate_cached_backend(
-                weights,
-                tokenizer,
-                ffn,
-                initial_ids,
-                max_tokens,
-                Some(&*backend),
-                window,
-                |_id, tok| {
-                    print!("{tok}");
-                    let _ = stdout.flush();
+    // Unified `KvEngine` dispatch. Resolves the legacy `--kv-cache`
+    // flag to an `EngineKind` and drives generation through
+    // `generate_with_engine`. Bit-parity with the previous
+    // `generate_cached_backend` / `predict_with_ffn` paths is enforced
+    // by `larql-kv`'s parity test suite (spec §8.4).
+    use larql_kv::EngineKind;
+    let (kind, label) = match args.kv_cache {
+        KvCacheKind::Standard => (
+            EngineKind::Standard { window_size: None },
+            "standard KV cache",
+        ),
+        KvCacheKind::MarkovBounded => (
+            EngineKind::Standard {
+                window_size: if args.context_window > 0 {
+                    Some(args.context_window)
+                } else {
+                    None
                 },
-            );
-            let label = if window.is_some() {
-                "Markov-bounded KV cache"
-            } else {
-                "standard KV cache"
-            };
-            (g, label)
-        }
-        KvCacheKind::None => {
-            // No-cache: run full forward per step. O(N²).
-            let mut ids = initial_ids.to_vec();
-            let mut generated = Vec::with_capacity(max_tokens);
-            for _ in 0..max_tokens {
-                let result = predict_with_ffn(weights, tokenizer, &ids, 1, ffn);
-                let next_id = match result.token_ids.first() {
-                    Some(&id) => id,
-                    None => break,
-                };
-                let tok_str = result
-                    .predictions
-                    .first()
-                    .map(|p| p.0.as_str())
-                    .unwrap_or("");
-                print!("{tok_str}");
-                let _ = stdout.flush();
-                ids.push(next_id);
-                generated.push(next_id);
-                if is_stop_token(tok_str) {
-                    break;
-                }
-            }
-            (generated, "no cache (O(N²))")
-        }
+            },
+            "Markov-bounded KV cache",
+        ),
+        KvCacheKind::None => (EngineKind::NoCache, "no cache (O(N²))"),
     };
+    let mut engine = kind.build(backend);
+    let generated = larql_inference::forward::generate_with_engine(
+        engine.as_mut(),
+        weights,
+        tokenizer,
+        ffn,
+        initial_ids,
+        max_tokens,
+        |_id, tok| {
+            print!("{tok}");
+            let _ = stdout.flush();
+        },
+    );
     println!();
     if verbose {
         // Honest reporting: the backend is `backend.name()` but the
@@ -1110,7 +1096,7 @@ fn generate_stream(
             "  Generated {} tokens ({}) — backend={} (decode matmuls usually below GPU threshold)",
             generated.len(),
             label,
-            backend.name(),
+            backend_name,
         );
     }
     generated

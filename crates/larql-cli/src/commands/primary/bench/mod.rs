@@ -16,6 +16,7 @@
 //!   --ffn URL             bench remote FFN path.
 //!   --wire f32,f16,i8     compare wire formats end-to-end (requires --ffn).
 //!   --bench-grid          shard-count scaling sweep (requires --moe-shards or --ffn).
+//!   --bench-grid-lan PATH LAN preregistration matrix (Exp 41) from a JSON config.
 //!   --concurrent N        simulate N concurrent clients (default: 1).
 //!   --output json         also emit machine-readable JSON.
 //!   --output-file PATH    write JSON to file instead of stdout.
@@ -40,6 +41,8 @@ pub mod run;
 
 pub(super) mod engine;
 pub(super) mod engine_runtime;
+pub(super) mod grid_lan;
+pub(super) mod grid_lan_runtime;
 pub(super) mod local;
 pub(super) mod local_runtime;
 pub(super) mod ollama;

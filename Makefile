@@ -502,6 +502,43 @@ larql-router-coverage-html:
 
 larql-router-ci: larql-router-fmt-check larql-router-lint larql-router-test
 
+# larql-router-protocol — generated proto + QUIC transport wrapper.
+# Only `transport/quic.rs` carries instrumented logic; everything else
+# is `tonic::include_proto!`-generated code llvm-cov filters out.
+LARQL_ROUTER_PROTOCOL_COVERAGE_MIN ?= 90
+LARQL_ROUTER_PROTOCOL_COVERAGE_POLICY ?= crates/larql-router-protocol/coverage-policy.json
+LARQL_ROUTER_PROTOCOL_COVERAGE_REPORT ?= coverage/larql-router-protocol/summary.json
+
+larql-router-protocol-test:
+	cargo test -p larql-router-protocol --features quic
+
+larql-router-protocol-fmt-check:
+	cargo fmt -p larql-router-protocol -- --check
+
+larql-router-protocol-lint:
+	cargo clippy -p larql-router-protocol --features quic --all-targets -- -D warnings
+
+larql-router-protocol-coverage-policy:
+	@if [ ! -f "$(LARQL_ROUTER_PROTOCOL_COVERAGE_REPORT)" ]; then \
+		echo "Coverage report not found: $(LARQL_ROUTER_PROTOCOL_COVERAGE_REPORT)"; \
+		echo "Run: make larql-router-protocol-coverage-summary"; \
+		exit 1; \
+	fi
+	python3 scripts/check_coverage_policy.py $(LARQL_ROUTER_PROTOCOL_COVERAGE_REPORT) $(LARQL_ROUTER_PROTOCOL_COVERAGE_POLICY)
+
+larql-router-protocol-coverage-summary:
+	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
+		echo "cargo-llvm-cov not installed. Install with:"; \
+		echo "  cargo install cargo-llvm-cov"; \
+		exit 1; \
+	fi
+	cargo llvm-cov --package larql-router-protocol --features quic --summary-only --fail-under-lines $(LARQL_ROUTER_PROTOCOL_COVERAGE_MIN)
+	@mkdir -p coverage/larql-router-protocol
+	cargo llvm-cov report --package larql-router-protocol --json --summary-only --output-path $(LARQL_ROUTER_PROTOCOL_COVERAGE_REPORT)
+	$(MAKE) larql-router-protocol-coverage-policy
+
+larql-router-protocol-ci: larql-router-protocol-fmt-check larql-router-protocol-lint larql-router-protocol-test
+
 # larql-lql — LQL parser, executor, REPL. Crate has no metal default;
 # Remote-backend tests use `mockito`, no real model weights required.
 larql-lql-test:

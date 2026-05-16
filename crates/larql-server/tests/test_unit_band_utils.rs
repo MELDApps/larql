@@ -168,6 +168,7 @@ fn make_minimal_model(layer_bands: Option<LayerBands>) -> Arc<LoadedModel> {
             larql_server::metrics::LayerLatencyTracker::new(),
         ),
         requests_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        requests_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         expert_filter: None,
         unit_filter: None,
         moe_remote: None,

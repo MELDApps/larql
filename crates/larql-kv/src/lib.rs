@@ -16,120 +16,44 @@ pub mod profiler;
 
 pub use engines::apollo;
 pub use engines::markov_residual;
+pub use engines::no_cache;
+pub use engines::standard;
 pub use engines::turbo_quant;
 pub use engines::unlimited_context;
 
 pub use engines::markov_residual::MarkovResidualEngine;
+pub use engines::no_cache::NoCacheEngine;
+pub use engines::standard::StandardEngine;
 pub use engines::unlimited_context::UnlimitedContextEngine;
 
 use larql_compute::ComputeBackend;
-use larql_inference::ModelWeights;
-use ndarray::Array2;
 
-// ─── EngineInfo ───────────────────────────────────────────────────────────────
-
-/// Runtime diagnostics reported by each engine.
-#[derive(Debug, Clone)]
-pub struct EngineInfo {
-    /// Short engine name (e.g. `"markov-rs"`).
-    pub name: String,
-    /// Human-readable description of the engine's state management strategy.
-    pub description: String,
-    /// Hardware backend name from [`ComputeBackend::name`]: `"cpu"`, `"metal"`, etc.
-    pub backend: String,
-    /// Key config parameters (e.g. `"window=512"`), empty string if unconfigured.
-    pub config: String,
-}
-
-impl EngineInfo {
-    pub fn summary(&self) -> String {
-        if self.config.is_empty() {
-            format!("{} [{}]  {}", self.name, self.backend, self.description)
-        } else {
-            format!(
-                "{} [{}] ({})  {}",
-                self.name, self.backend, self.config, self.description
-            )
-        }
-    }
-}
-
-// ─── KvEngine trait ───────────────────────────────────────────────────────────
-
-/// Common interface shared by all KV-cache engines.
-pub trait KvEngine: Send {
-    fn name(&self) -> &str;
-
-    /// Runtime diagnostics: engine name, backend, config, description.
-    fn info(&self) -> EngineInfo;
-
-    /// Run the prefill forward pass over all prompt tokens.
-    /// Returns the hidden state at the final token position (shape `[1, hidden_dim]`).
-    fn prefill(&mut self, weights: &ModelWeights, token_ids: &[u32]) -> Option<Array2<f32>>;
-
-    /// Run one autoregressive decode step for a single new token.
-    /// Returns the hidden state (shape `[1, hidden_dim]`).
-    fn decode_step(&mut self, weights: &ModelWeights, token_id: u32) -> Option<Array2<f32>>;
-
-    /// Bytes of persistent engine state (excludes model weights).
-    fn memory_bytes(&self) -> usize;
-
-    /// Token count in the active hot window (varies by engine type).
-    fn window_tokens(&self) -> usize {
-        0
-    }
-
-    /// Cold-tier bytes (residuals or token IDs past the hot window).
-    fn cold_bytes(&self) -> usize {
-        0
-    }
-
-    /// Per-stage timing summary. Returns `None` if profiling was not enabled.
-    fn stage_summary(&self) -> Option<profiler::DecodeStageSummary> {
-        None
-    }
-
-    /// Prefill using Q4K quantised weights from `index` and `backend`.
-    ///
-    /// When the backend supports the fused Q4 pipeline (Metal), this routes
-    /// through `backend.prefill_q4` for full GPU speed. Falls back to the
-    /// f32 path when `backend.has_q4() == false` or `index` has no Q4K data.
-    ///
-    /// `weights` is `&mut` so the engine can lazily insert dequantised f32
-    /// attention tensors into `weights.tensors` on the first call (one-time
-    /// cost; subsequent decode steps reuse the cached tensors).
-    fn prefill_q4k(
-        &mut self,
-        weights: &mut ModelWeights,
-        index: &larql_vindex::VectorIndex,
-        token_ids: &[u32],
-        backend: &dyn larql_compute::ComputeBackend,
-    ) -> Option<Array2<f32>> {
-        let _ = (index, backend);
-        self.prefill(weights, token_ids) // default: f32 fallback
-    }
-
-    /// One autoregressive decode step using Q4K weights.
-    ///
-    /// Same routing semantics as [`prefill_q4k`]: Metal via `decode_token`
-    /// when available, f32 fallback otherwise.
-    fn decode_step_q4k(
-        &mut self,
-        weights: &mut ModelWeights,
-        index: &larql_vindex::VectorIndex,
-        token_id: u32,
-        backend: &dyn larql_compute::ComputeBackend,
-    ) -> Option<Array2<f32>> {
-        let _ = (index, backend);
-        self.decode_step(weights, token_id) // default: f32 fallback
-    }
-}
+// ─── Trait surface re-exported from larql-inference ──────────────────────────
+//
+// `KvEngine`, `EngineInfo`, and `DecodeStageSummary` live in
+// `larql-inference` so the dispatch loop there can reference them without
+// a circular dependency on `larql-kv`. They're re-exported here so external
+// callers and engine impls in this crate keep their existing public API:
+// `larql_kv::KvEngine` continues to resolve to the same trait.
+//
+// See `crates/larql-inference/docs/specs/kv-engine-unification.md` §10.4.
+pub use larql_inference::{DecodeStageSummary, EngineInfo, KvEngine};
 
 // ─── EngineKind ───────────────────────────────────────────────────────────────
 
 /// Engine selector. Parse with [`EngineKind::from_name`]; build with [`EngineKind::build`].
 #[derive(Debug, Clone)]
 pub enum EngineKind {
+    /// Production K/V tensor cache. `window_size: None` = unbounded
+    /// growth (`--kv-cache standard`); `Some(N)` = sliding window
+    /// (`--kv-cache markov-bounded --context-window N`). Default
+    /// engine; bit-identical to today's live decode.
+    Standard {
+        window_size: Option<usize>,
+    },
+    /// No cache; full re-forward per decode step. O(N²) wall-time.
+    /// Correctness fallback only (`--kv-cache none`).
+    NoCache,
     MarkovResidual {
         window_size: Option<usize>,
     },
@@ -151,6 +75,9 @@ impl EngineKind {
     ///
     /// Examples:
     /// ```text
+    /// standard
+    /// standard:window=1024
+    /// no-cache
     /// markov-rs
     /// markov-rs:window=1024
     /// unlimited-context:window=256
@@ -181,6 +108,18 @@ impl EngineKind {
         };
 
         match name.trim() {
+            "standard" | "full" | "fp32" => {
+                let window_size = params.get("window").and_then(|v| v.parse().ok());
+                Some(EngineKind::Standard { window_size })
+            }
+            "markov-bounded" | "bounded" | "sliding" => {
+                // Legacy `--kv-cache markov-bounded` flag resolves to the
+                // sliding-window form of the standard engine. Bit-parity
+                // with today's live decode.
+                let window_size = params.get("window").and_then(|v| v.parse().ok());
+                Some(EngineKind::Standard { window_size })
+            }
+            "no-cache" | "no_cache" | "none" | "off" => Some(EngineKind::NoCache),
             "markov-rs" | "markov_rs" | "markov-residual" | "markov_residual" => {
                 let window_size = params.get("window").and_then(|v| v.parse().ok());
                 Some(EngineKind::MarkovResidual { window_size })
@@ -208,6 +147,8 @@ impl EngineKind {
 
     pub fn display_name(&self) -> &'static str {
         match self {
+            EngineKind::Standard { .. } => "standard",
+            EngineKind::NoCache => "no-cache",
             EngineKind::MarkovResidual { .. } => "markov-rs",
             EngineKind::UnlimitedContext { .. } => "unlimited-context",
             EngineKind::TurboQuant { .. } => "turbo-quant",
@@ -226,7 +167,15 @@ impl EngineKind {
         backend: Box<dyn ComputeBackend>,
         profiling: bool,
     ) -> Box<dyn KvEngine> {
+        // `profiling` is honoured only by engines that implement it
+        // (currently MarkovResidual). Other engines accept the flag for
+        // a uniform construction API and ignore it.
+        let _ = profiling;
         match self {
+            EngineKind::Standard { window_size } => {
+                Box::new(standard::StandardEngine::with_backend(window_size, backend))
+            }
+            EngineKind::NoCache => Box::new(no_cache::NoCacheEngine::with_backend(backend)),
             EngineKind::MarkovResidual { window_size } => Box::new(
                 markov_residual::MarkovResidualEngine::with_backend(window_size, backend)
                     .with_profiling(profiling),
@@ -285,6 +234,31 @@ mod tests {
 
     #[test]
     fn engine_kind_from_name_with_params() {
+        match EngineKind::from_name("standard") {
+            Some(EngineKind::Standard { window_size: None }) => {}
+            other => panic!("expected Standard{{window=None}}, got {other:?}"),
+        }
+        match EngineKind::from_name("standard:window=512") {
+            Some(EngineKind::Standard {
+                window_size: Some(512),
+            }) => {}
+            other => panic!("expected Standard{{window=512}}, got {other:?}"),
+        }
+        match EngineKind::from_name("markov-bounded:window=256") {
+            // Legacy flag → Standard{Some(N)}.
+            Some(EngineKind::Standard {
+                window_size: Some(256),
+            }) => {}
+            other => panic!("expected Standard{{window=256}}, got {other:?}"),
+        }
+        match EngineKind::from_name("no-cache") {
+            Some(EngineKind::NoCache) => {}
+            other => panic!("expected NoCache, got {other:?}"),
+        }
+        match EngineKind::from_name("none") {
+            Some(EngineKind::NoCache) => {}
+            other => panic!("expected NoCache from 'none', got {other:?}"),
+        }
         match EngineKind::from_name("markov-rs:window=1024") {
             Some(EngineKind::MarkovResidual {
                 window_size: Some(1024),
@@ -346,9 +320,16 @@ mod tests {
 mod compliance_tests {
     use super::*;
     use larql_compute::cpu_backend;
+    use larql_inference::ModelWeights;
+    use ndarray::Array2;
 
     fn all_kinds() -> Vec<EngineKind> {
         vec![
+            EngineKind::Standard { window_size: None },
+            EngineKind::Standard {
+                window_size: Some(64),
+            },
+            EngineKind::NoCache,
             EngineKind::MarkovResidual { window_size: None },
             EngineKind::MarkovResidual {
                 window_size: Some(32),
@@ -380,6 +361,9 @@ mod compliance_tests {
     #[test]
     fn all_engines_have_valid_name() {
         let expected = [
+            "standard",
+            "standard",
+            "no-cache",
             "markov-rs",
             "markov-rs",
             "unlimited-context",
@@ -453,6 +437,11 @@ mod compliance_tests {
     #[test]
     fn from_name_all_engines_parseable() {
         let specs = [
+            ("standard", "standard"),
+            ("standard:window=128", "standard"),
+            ("markov-bounded", "standard"),
+            ("no-cache", "no-cache"),
+            ("none", "no-cache"),
             ("markov-rs", "markov-rs"),
             ("unlimited-context", "unlimited-context"),
             ("turbo-quant", "turbo-quant"),
@@ -493,11 +482,21 @@ mod compliance_tests {
                 config: String::new(),
             }
         }
-        fn prefill(&mut self, _weights: &ModelWeights, _token_ids: &[u32]) -> Option<Array2<f32>> {
+        fn prefill(
+            &mut self,
+            _weights: &ModelWeights,
+            _ffn: &dyn larql_inference::ffn::FfnBackend,
+            _token_ids: &[u32],
+        ) -> Option<Array2<f32>> {
             self.prefill_calls += 1;
             Some(Array2::zeros((1, 4)))
         }
-        fn decode_step(&mut self, _weights: &ModelWeights, _token_id: u32) -> Option<Array2<f32>> {
+        fn decode_step(
+            &mut self,
+            _weights: &ModelWeights,
+            _ffn: &dyn larql_inference::ffn::FfnBackend,
+            _token_id: u32,
+        ) -> Option<Array2<f32>> {
             self.decode_calls += 1;
             Some(Array2::zeros((1, 4)))
         }
@@ -508,9 +507,11 @@ mod compliance_tests {
 
     #[test]
     fn default_q4k_methods_fallback_to_f32() {
+        use larql_inference::ffn::WeightFfn;
         let weights = larql_inference::test_utils::make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let backend = cpu_backend();
+        let ffn = WeightFfn { weights: &weights };
         let mut engine = DefaultMethodsEngine {
             prefill_calls: 0,
             decode_calls: 0,
@@ -518,14 +519,14 @@ mod compliance_tests {
 
         // Build a separate &mut binding for the `prefill_q4k` call.
         let mut weights_for_q4k = larql_inference::test_utils::make_test_weights();
-        let out = engine.prefill_q4k(&mut weights_for_q4k, &index, &[1, 2, 3], &*backend);
+        let out = engine.prefill_q4k(&mut weights_for_q4k, &ffn, &index, &[1, 2, 3], &*backend);
         assert!(out.is_some());
         assert_eq!(
             engine.prefill_calls, 1,
             "default prefill_q4k must call prefill"
         );
 
-        let out = engine.decode_step_q4k(&mut weights_for_q4k, &index, 4, &*backend);
+        let out = engine.decode_step_q4k(&mut weights_for_q4k, &ffn, &index, 4, &*backend);
         assert!(out.is_some());
         assert_eq!(
             engine.decode_calls, 1,

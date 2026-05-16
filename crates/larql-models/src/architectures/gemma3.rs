@@ -82,11 +82,39 @@ impl ModelArchitecture for Gemma3Arch {
 
     fn rope_base_for_layer(&self, layer: usize) -> f64 {
         if self.is_sliding_window_layer(layer) {
-            // Local layers use a lower RoPE base
-            self.config.rope_local_base.unwrap_or(10_000.0)
+            // Local layers use a lower RoPE base.
+            self.config
+                .rope_local_base
+                .unwrap_or(crate::defaults::ROPE_BASE_DEFAULT)
         } else {
-            // Global layers use the full rope_theta
+            // Global layers use the full rope_theta.
             self.config.rope_base
+        }
+    }
+
+    /// Apply linear `rope_scaling.factor` to global (full-attention)
+    /// layers only. HF's `Gemma3TextConfig` expands the flat
+    /// `rope_scaling = {rope_type: linear, factor: N}` into the
+    /// structured `{full_attention: {rope_type: linear, factor: N},
+    /// sliding_attention: {rope_type: default}}` form — sliding layers
+    /// stay at standard RoPE.
+    ///
+    /// The parser sets `gemma3_global_only = true` on the structured
+    /// form. For the flat form (older Gemma 3 dumps), we still honour
+    /// `scaling_type = linear` as global-only because that matches what
+    /// `Gemma3TextConfig` produces from the same input.
+    fn rope_position_divisor_for_layer(&self, layer: usize) -> f64 {
+        let rs = match self.config.rope_scaling.as_ref() {
+            Some(rs) => rs,
+            None => return 1.0,
+        };
+        if !rs.scaling_type.eq_ignore_ascii_case("linear") {
+            return 1.0;
+        }
+        if self.is_sliding_window_layer(layer) {
+            1.0
+        } else {
+            rs.factor
         }
     }
 }

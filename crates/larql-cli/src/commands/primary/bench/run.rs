@@ -8,6 +8,7 @@ use crate::commands::primary::cache;
 
 use super::args::BenchArgs;
 use super::engine_runtime::{run_engine, run_engine_q4k};
+use super::grid_lan_runtime::{self, GridLanOptions};
 use super::helpers;
 use super::local_runtime::run_larql;
 use super::ollama::run_ollama;
@@ -17,6 +18,42 @@ use super::remote_moe_runtime::run_concurrent_moe;
 use super::row::{BenchJsonLatency, BenchJsonResult, BenchJsonRow, BenchJsonStages, BenchRow};
 
 pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // Configure rayon's global thread pool up front. Auto-select picks
+    // 8 on Apple silicon — empirically the sweet spot for Q4_K × Q8_K
+    // matvec on M3 Max's LPDDR5 controllers (12-thread default
+    // saturates DRAM channels + adds rayon work-steal overhead, see
+    // `bench/baselines/cpu/DIAGNOSIS-2026-05-16-thread-scaling.md`).
+    // `RAYON_NUM_THREADS` in the environment overrides everything.
+    configure_rayon_threads(args.threads);
+
+    // --bench-grid-lan short-circuits the normal flow: it orchestrates
+    // a matrix of independent `larql bench` invocations from a JSON
+    // config, mirroring `experiments/41_residual_transport_grid/run.py`.
+    if let Some(config_path) = args.bench_grid_lan.clone() {
+        let out_dir = args.grid_lan_out.clone().unwrap_or_else(|| {
+            let parent = config_path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            parent.join("results")
+        });
+        let only = if args.grid_lan_only.is_empty() {
+            None
+        } else {
+            Some(args.grid_lan_only.clone())
+        };
+        return grid_lan_runtime::run(GridLanOptions {
+            config_path,
+            out_dir,
+            only,
+            include_disabled: args.grid_lan_include_disabled,
+            dry_run: args.grid_lan_dry_run,
+            timeout_secs: None,
+            cov_threshold: args.grid_lan_cov_threshold,
+            cov_extra_repeats: args.grid_lan_extra_repeats,
+        });
+    }
+
     let vindex_path = cache::resolve_model(&args.model)?;
     if !vindex_path.is_dir() {
         return Err(format!(
@@ -48,6 +85,10 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("larql bench: {}", vindex_path.display());
     println!("Prompt: {:?}", args.prompt);
+    if want_cpu {
+        let active = rayon::current_num_threads();
+        println!("CPU threads: {} (rayon)", active);
+    }
     println!(
         "Decode: {} tokens after {} warmup; backends={}{}",
         args.tokens,
@@ -285,4 +326,54 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+/// Configure rayon's global thread pool for the bench. Precedence:
+/// 1. `RAYON_NUM_THREADS` env var if set (rayon's standard override).
+/// 2. `--threads N` arg if non-zero.
+/// 3. Auto: 8 on Apple silicon (M-series), rayon default elsewhere.
+///
+/// Apple silicon (M1/M2/M3/M4 Max) shows a clear sweet spot at 8
+/// threads for memory-bandwidth-bound Q4_K matvec kernels. Past 8
+/// threads, LPDDR5 channel contention plus rayon's lack of P-core
+/// pinning causes a ~15% throughput regression vs the 8-thread
+/// configuration. Documented in
+/// `bench/baselines/cpu/DIAGNOSIS-2026-05-16-thread-scaling.md`.
+fn configure_rayon_threads(threads_arg: usize) {
+    if std::env::var_os("RAYON_NUM_THREADS").is_some() {
+        // Rayon will read the env var on first pool access. Don't
+        // build_global() here — we'd race with that lazy init.
+        return;
+    }
+    let n_threads = if threads_arg > 0 {
+        threads_arg
+    } else {
+        auto_default_threads()
+    };
+    if n_threads == 0 {
+        return;
+    }
+    // build_global only succeeds once per process. Ignore errors —
+    // they only happen when rayon's already been initialised (e.g.
+    // from a parallel test harness or a previous `run` in the same
+    // process), which is fine.
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(n_threads)
+        .build_global();
+}
+
+/// Pick a sensible default thread count when the user hasn't set one.
+/// Returns 0 to fall through to rayon's own default on unknown CPUs.
+fn auto_default_threads() -> usize {
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    {
+        // Apple silicon: 8 threads is the empirical optimum for the
+        // Q4_K × Q8_K matvec on M3 Max LPDDR5. Confirmed across the
+        // 12-P-core M3 Max (best 24.6 tok/s) — see thread-scaling
+        // diagnosis doc. M1/M2/M4 are likely similar but unverified;
+        // user can override with `--threads`.
+        return 8;
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+    0
 }

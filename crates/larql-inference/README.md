@@ -83,7 +83,7 @@ LM-head path resolution (which kernel fires per next-token):
 | `residual.rs` | RMS norm, layer norm |
 | `trace/` | Residual stream decomposition and tiered storage |
 | `vindex/` | `open_inference_vindex` (strict loader) + `WalkFfn` (mmap'd FFN) + `q4k_forward/` |
-| `engines/` | KV-cache engines: `MarkovResidualEngine`, `UnlimitedContextEngine`, `Apollo`, `TurboQuant` (behind the `KvEngine` trait) |
+| `kv_engine.rs` | `KvEngine` trait + `EngineInfo` + `DecodeStageSummary` — abstract dispatch surface shared with `larql-kv` (engine impls live there) |
 | `experts/` | WASM expert dispatcher and registry |
 | `chat/` | Jinja-driven chat templates loaded from vindex |
 | `capture.rs` | Residual-stream vector capture for probing |

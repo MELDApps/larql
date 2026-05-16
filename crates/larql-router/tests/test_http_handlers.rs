@@ -100,7 +100,9 @@ async fn spawn_fake_shard() -> (SocketAddr, ShardCalls) {
                             .await
                             .unwrap();
                         let json: Value = serde_json::from_slice(&body).unwrap();
-                        fake_walk_ffn(st, axum::extract::Json(json)).await.into_response()
+                        fake_walk_ffn(st, axum::extract::Json(json))
+                            .await
+                            .into_response()
                     }
                 },
             ),
@@ -227,10 +229,7 @@ async fn walk_ffn_rejects_layer_outside_shard_map() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
     let v: Value = serde_json::from_slice(&body).unwrap();
-    assert!(v["error"]
-        .as_str()
-        .unwrap()
-        .contains("no owning shard"));
+    assert!(v["error"].as_str().unwrap().contains("no owning shard"));
 }
 
 #[tokio::test]
@@ -412,6 +411,7 @@ async fn walk_ffn_routes_via_grid_when_grid_state_is_set() {
         requests_in_flight: 0,
         last_seen: std::time::Instant::now(),
         layer_latencies: HashMap::new(),
+        req_per_sec: 0.0,
     });
 
     let client = reqwest::Client::builder()
