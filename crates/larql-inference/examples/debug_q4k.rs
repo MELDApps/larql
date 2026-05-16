@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Q4_K Data Integrity Check ===\n");
 
     // Check attn Q4K data for layer 0
-    if let Some([q, k, v, o]) = index.attn_q4k_layer_data(0) {
+    if let Some([q, k, v, o]) = index.attn_kquant_layer_data(0) {
         println!("Layer 0 attention Q4_K:");
         println!("  Q: {} bytes, format={}", q.0.len(), q.1);
         println!("  K: {} bytes, format={}", k.0.len(), k.1);
@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Try a simple Q4K matvec to verify the data works
     println!("=== Q4K matvec test ===\n");
-    if let Some([q_data, _, _, _]) = index.attn_q4k_layer_data(0) {
+    if let Some([q_data, _, _, _]) = index.attn_kquant_layer_data(0) {
         let hidden = weights.hidden_size;
         let q_dim = weights.num_q_heads * weights.head_dim;
         let x: Vec<f32> = (0..hidden).map(|i| (i as f32) * 0.001).collect();
@@ -76,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check interleaved Q4K FFN data
     let gate_index: &dyn larql_vindex::GateIndex = &index;
-    if let Some(mmap) = gate_index.interleaved_q4k_mmap_ref() {
+    if let Some(mmap) = gate_index.interleaved_kquant_mmap_ref() {
         let intermediate = gate_index.num_features(0);
         let hidden = weights.hidden_size;
         let per_matrix = (intermediate * hidden).div_ceil(256) * 148;

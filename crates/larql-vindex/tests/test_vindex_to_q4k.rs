@@ -357,7 +357,7 @@ fn q4k_end_to_end_from_synthetic_safetensors() {
     let mut lcb = larql_vindex::SilentLoadCallbacks;
     let mut index = larql_vindex::VectorIndex::load_vindex(&dst_dir, &mut lcb).unwrap();
     index.load_attn_q4k(&dst_dir).unwrap();
-    let slices = index.attn_q4k_layer_data(0).expect("layer 0 attn data");
+    let slices = index.attn_kquant_layer_data(0).expect("layer 0 attn data");
     assert_eq!(slices[0].1, "Q4_K", "Q slot format");
     assert_eq!(slices[2].1, "Q6_K", "V slot format");
 
@@ -448,7 +448,7 @@ fn q4k_feature_major_down_round_trip() {
     let mut lcb = larql_vindex::SilentLoadCallbacks;
     let index = larql_vindex::VectorIndex::load_vindex(&dst_dir, &mut lcb).unwrap();
     assert!(
-        index.has_down_features_q4k(),
+        index.has_down_features_kquant(),
         "loader must surface the feature-major down file"
     );
 
@@ -460,14 +460,14 @@ fn q4k_feature_major_down_round_trip() {
     let layer = 0;
     let feat = 1usize;
     assert!(
-        index.q4k_down_feature_scaled_add(layer, feat, alpha, &mut out),
+        index.kquant_down_feature_scaled_add(layer, feat, alpha, &mut out),
         "feature-major down decode must succeed when the file is present"
     );
     let (cache_slots, cache_bytes) = index.q4k_ffn_cache_stats();
     assert_eq!(
         (cache_slots, cache_bytes),
         (0, 0),
-        "feature-major path must NOT have populated the legacy q4k_ffn_layer cache"
+        "feature-major path must NOT have populated the legacy kquant_ffn_layer cache"
     );
 
     // ── Round-trip the values: decoded row must approximate

@@ -8,10 +8,20 @@ Self-assembling grid is feature-complete across ADR-0004 Phase 1–5, ADR-0010
 (QUIC), ADR-0011 (Mode B + Phase B2 drain-then-reassign + replication),
 ADR-0012 Phase 2 (criterion micro-benchmarks, both worst-case + production-shape),
 ADR-0013 (three-tier routing comparator + active-probe RTT),
-ADR-0014 (hot-shard load-rate replication),
-ADR-0015 (ShardService.Query KNN endpoint), and
-ADR-0016 (router module organization). Static `--shards` (ADR-0003) remains
-as a fallback and coexists with the grid.
+ADR-0014 (hot-shard load-rate replication + two-threshold hysteresis amendment),
+ADR-0015 (ShardService.Query KNN endpoint),
+ADR-0016 (router module organization),
+ADR-0017 (Prometheus `/metrics` endpoint, bounded-cardinality),
+ADR-0018 (MoE expert routing — `route_expert` / `route_all_experts`,
+per-(layer, expert-range) replication, JSON `experts` / `layer_experts`
+HTTP shapes),
+ADR-0019 (HTTP/3 shard transport, opt-in via `--http3-shards` and
+`--http3-port`), and
+ADR-0020 (saturation-tier backpressure in `route()` —
+`--saturation-ceiling N`, 503 with `Retry-After: 0.5`, distinguished
+from 400 via `has_owners_for`, `larql_router_route_saturation_total`
+counter). Static `--shards` (ADR-0003) remains as a fallback and coexists
+with the grid.
 
 The codebase is architecture-agnostic: routing logic reads layer ranges,
 `model_id`, and server state from the grid protocol — no model-family
@@ -65,18 +75,28 @@ constants are hardcoded.
   `mod`, `routing`, `replication`, `hot_shard`, `status`, `service`,
   and a `#[cfg(test)] testing` helper.
 - Examples — `examples/embed_grid.rs`, `examples/fanout_dispatch.rs`,
-  `examples/static_shards_server.rs`, `examples/admin_client.rs`.
-- Criterion benchmarks (GT9 ✅) — `routing.rs` with seven groups:
+  `examples/static_shards_server.rs`, `examples/admin_client.rs`,
+  `examples/saturation_backpressure.rs` (ADR-0020 — drives a
+  `GridState` through five saturation/coverage scenarios and prints
+  the routing-layer decision plus the HTTP status the dispatcher
+  would emit).
+- Criterion benchmarks (GT9 ✅) — `routing.rs` with ten groups:
   `route_single_layer` + `route_all` (worst-case full replication),
   `route_realistic` + `route_all_realistic` (production-shape
-  contiguous shards × `target_replicas`), `heartbeat_update`,
+  contiguous shards × `target_replicas`), `route_expert_single` +
+  `route_all_experts` (ADR-0018 MoE), `heartbeat_update`,
   `single_register` (per-join rebuild cost), `register_cascade` (N
-  sequential joins — O(N²) cold-start measurement).
+  sequential joins — O(N²) cold-start measurement), and
+  `saturation_filter` (ADR-0020 — no-filter / filter-all-unsat /
+  filter-all-sat across 5, 10, 20 shards × 2 replicas).
 
 ### What is not yet implemented
 
 - **Cross-router federation** — multi-region routing (P2).
-- **Expert-level routing** — MoE within-layer expert sharding (P2).
+  (MoE within-layer expert sharding — previously listed here as P2
+  — shipped 2026-05-16 as ADR-0018; see the "Shipped" line above
+  for `route_expert` / `route_all_experts` and the self-healing
+  section below for per-(layer, expert-range) replication.)
 
 ---
 
@@ -295,7 +315,12 @@ Vindex coverage (for grid-relevant context — gate_knn lives there):
 **Limitation:** This is QUIC-as-TCP-replacement (HTTP/2 over a single QUIC
 bi-stream), not HTTP/3. Buys 0-RTT reconnect + TLS 1.3 + BBRv2 congestion
 control; per-stream-independence is moot for `Join` (single bidi stream
-per server). HTTP/3 for expert-fan-out would be a future ADR.
+per server). **Real HTTP/3 for the shard-fan-out path shipped under
+ADR-0019** (2026-05-16, `--http3-shards` / `--http3-port`, h3 0.0.8 +
+h3-quinn 0.0.10 + h3-axum 0.2). Router-protocol h3 transport ships
+`H3Client::post_json` + `serve_axum`; the MoE expert fan-out path uses
+it when `h3_client: Some(_)` is wired into `AppState`. See the
+"Shipped" line in the self-healing-grid section below.
 
 ---
 
@@ -594,10 +619,14 @@ across many hosts.
   only that shard, not its sibling.
 - **`larql_router_grid_shard_kind{kind=dense|moe}`** — bounded-
   cardinality Prometheus gauge for grid-wide MoE health.
-- **Coverage** — 19/20 files at 90%+ post-MoE, total 93.29%.
-- **Dense regression** — all 202 pre-MoE tests still green; bench
-  shows dense `route()` within ±10% of the pre-MoE baseline (the
-  expert filter is a single boolean check on a dense `ServerEntry`).
+- **Coverage** — 19/20 files at 90%+ post-MoE + ADR-0020, total
+  93.21% (`grid/service.rs` at 89.87% — within its 88% debt
+  baseline; `main.rs` excluded from per-file).
+- **Dense regression** — all 202 pre-MoE tests still green plus the
+  post-MoE/ADR-0020/chaos additions (163 lib + 47 integration =
+  210 tests, 211 with `--features http3`); bench shows dense
+  `route()` within ±10% of the pre-MoE baseline (the expert filter
+  is a single boolean check on a dense `ServerEntry`).
 
 **Target deployment scale (per ADR-0018 §Target deployments):**
 DeepSeek-V3 (671B / 60 layers × 256 experts), Kimi K2 / K2.6

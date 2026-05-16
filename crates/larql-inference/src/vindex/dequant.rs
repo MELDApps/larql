@@ -1,6 +1,6 @@
 //! Q4K attention-weight dequantisation helper.
 //!
-//! Bridges Q4K vindex data (`VectorIndex::attn_q4k_layer_data`) into
+//! Bridges Q4K vindex data (`VectorIndex::attn_kquant_layer_data`) into
 //! `ModelWeights::tensors` as f32 tensors, so `KvDispatch` backends
 //! that don't (yet) have native Q4K kernels can fall back to the f32
 //! attention path.
@@ -30,7 +30,7 @@ use ndarray::Array2;
 /// `weights.tensors`. Idempotent — skips layers whose `attn_q_key` is
 /// already present in `weights.tensors`.
 ///
-/// No-op for layers where `index.attn_q4k_layer_data(layer)` returns
+/// No-op for layers where `index.attn_kquant_layer_data(layer)` returns
 /// `None` (i.e., a layer with non-Q4K attention or no Q4K data at all).
 pub fn ensure_attn_tensors_dequantised(weights: &mut ModelWeights, index: &VectorIndex) {
     let num_layers = weights.num_layers;
@@ -40,7 +40,7 @@ pub fn ensure_attn_tensors_dequantised(weights: &mut ModelWeights, index: &Vecto
         if weights.tensors.contains_key(&q_key) {
             continue;
         }
-        let Some(attn) = index.attn_q4k_layer_data(layer) else {
+        let Some(attn) = index.attn_kquant_layer_data(layer) else {
             continue;
         };
         let num_q = arch.num_q_heads_for_layer(layer);

@@ -1,13 +1,13 @@
-//! Q4_K/Q6_K dequant cache — `q4k_ffn_layer` lazily decodes a whole
+//! Q4_K/Q6_K dequant cache — `kquant_ffn_layer` lazily decodes a whole
 //! layer to f32 (transposing down from `[hidden, intermediate]` to
 //! feature-major), shares the result via `Arc`, and bounds memory
 //! via an LRU controlled by `set_q4k_ffn_cache_max_layers`.
 //!
 //! **The cache is the legacy path.** Production Metal decode bypasses
-//! it entirely (`q4k_matmul_transb` streams Q4_K bytes through the
+//! it entirely (`kquant_matmul_transb` streams Q4_K bytes through the
 //! GPU). The W2 feature-major down emit (see
 //! `format/weights/write_q4k/feature_major_down.rs` + the
-//! `q4k_down_feature_scaled_add` dispatch) replaces the cache for
+//! `kquant_down_feature_scaled_add` dispatch) replaces the cache for
 //! per-feature down decode when `down_features_q4k.bin` is present.
 //! The cache stays as the fallback for vindexes extracted before
 //! W2 landed.
@@ -24,7 +24,7 @@ impl VectorIndex {
     /// total f32 bytes they hold. Used by perf probes that need to know
     /// whether a decode actually exercised the dequant cache (the hot
     /// path on Metal does NOT — it streams Q4_K bytes through
-    /// `q4k_matmul_transb`). Returns `(populated_slots, bytes)`.
+    /// `kquant_matmul_transb`). Returns `(populated_slots, bytes)`.
     pub fn q4k_ffn_cache_stats(&self) -> (usize, usize) {
         let cache = self.ffn.q4k_ffn_cache.lock().unwrap();
         let mut slots = 0usize;
@@ -106,10 +106,10 @@ impl VectorIndex {
     /// later accesses are a single `Arc` clone.
     ///
     /// **Memory cost.** Caching a 31B layer's up+down is ~1.85GB of f32
-    /// heap. For fine-grained inference prefer [`Self::q4k_ffn_row_into`],
+    /// heap. For fine-grained inference prefer [`Self::kquant_ffn_row_into`],
     /// which decodes a single feature into a caller-provided buffer
     /// without populating the cache.
-    pub fn q4k_ffn_layer(
+    pub fn kquant_ffn_layer(
         &self,
         layer: usize,
         component: usize,
@@ -128,7 +128,7 @@ impl VectorIndex {
                 }
             }
         }
-        let slices = self.interleaved_q4k_layer_data(layer)?;
+        let slices = self.interleaved_kquant_layer_data(layer)?;
         let (bytes, format) = slices[component];
         let intermediate = self.num_features(layer);
         if intermediate == 0 {
@@ -171,17 +171,17 @@ impl VectorIndex {
         Some(arc)
     }
 
-    /// Cache-based scaled-add — decodes the whole layer (`q4k_ffn_layer`)
+    /// Cache-based scaled-add — decodes the whole layer (`kquant_ffn_layer`)
     /// on first access, then serves `out += alpha * row` from the cached
     /// feature-major matrix. Required for down: it is stored transposed
     /// on disk (`[hidden, intermediate]`), so a per-row decode reads
     /// hidden-dim rows rather than feature vectors.
     ///
-    /// Superseded by `q4k_down_feature_scaled_add` when
+    /// Superseded by `kquant_down_feature_scaled_add` when
     /// `down_features_q4k.bin` is present (W2). Stays here as the
     /// fallback for legacy vindexes.
     #[inline]
-    pub fn q4k_ffn_row_scaled_add_via_cache(
+    pub fn kquant_ffn_row_scaled_add_via_cache(
         &self,
         layer: usize,
         component: usize,
@@ -189,7 +189,7 @@ impl VectorIndex {
         alpha: f32,
         out: &mut [f32],
     ) -> bool {
-        let Some(arc) = self.q4k_ffn_layer(layer, component) else {
+        let Some(arc) = self.kquant_ffn_layer(layer, component) else {
             return false;
         };
         let hidden = self.hidden_size;
@@ -211,7 +211,7 @@ impl VectorIndex {
     /// Every subsequent call is a single atomic load + `Arc::clone` —
     /// no mutex, no LRU, no contention between concurrent rayon workers.
     ///
-    /// The data layout matches `q4k_ffn_layer` exactly (component=2/down is
+    /// The data layout matches `kquant_ffn_layer` exactly (component=2/down is
     /// transposed to feature-major so callers can do `activation.dot(&view)`
     /// directly without an extra `.t()`).
     ///
@@ -219,14 +219,14 @@ impl VectorIndex {
     /// the layer index is out of range.  A `None` stored by `get_or_init`
     /// is permanent for this instance; callers must fall back to fresh
     /// dequant in that case.
-    pub fn q4k_ffn_layer_once(&self, layer: usize, component: usize) -> Option<Arc<Vec<f32>>> {
+    pub fn kquant_ffn_layer_once(&self, layer: usize, component: usize) -> Option<Arc<Vec<f32>>> {
         if component > 2 {
             return None;
         }
         let once = self.ffn.q4k_ffn_once.get(layer)?.get(component)?;
 
         let result = once.get_or_init(|| {
-            let slices = self.interleaved_q4k_layer_data(layer)?;
+            let slices = self.interleaved_kquant_layer_data(layer)?;
             let (bytes, format) = slices[component];
             let intermediate = self.num_features(layer);
             if intermediate == 0 {
@@ -242,7 +242,7 @@ impl VectorIndex {
             let final_data: Vec<f32> = if component == FFN_DOWN {
                 // Transpose on-disk [hidden, intermediate] → feature-major
                 // [intermediate, hidden] so callers can use activation.dot(&view)
-                // directly (matches layout produced by q4k_ffn_layer).
+                // directly (matches layout produced by kquant_ffn_layer).
                 let mut t = vec![0.0f32; n];
                 for h in 0..hidden {
                     let src_row = &decoded[h * intermediate..(h + 1) * intermediate];
@@ -355,22 +355,22 @@ mod tests {
         // Survives without panic; the OoB index is ignored.
     }
 
-    // ── q4k_ffn_layer cache-hit path ───────────────────────────────
+    // ── kquant_ffn_layer cache-hit path ───────────────────────────────
 
     #[test]
     fn q4k_ffn_layer_returns_none_for_invalid_component() {
         let v = fresh(2, 8);
-        assert!(v.q4k_ffn_layer(0, 99).is_none());
+        assert!(v.kquant_ffn_layer(0, 99).is_none());
         // Even with a cache entry "installed" in slot 0, component 99 is rejected early.
         install_cache_entry(&v, 0, 0, vec![1.0_f32; 8]);
-        assert!(v.q4k_ffn_layer(0, 99).is_none());
+        assert!(v.kquant_ffn_layer(0, 99).is_none());
     }
 
     #[test]
     fn q4k_ffn_layer_returns_cached_arc_on_hit() {
         let v = fresh(2, 8);
         install_cache_entry(&v, 0, 1, vec![1.0_f32; 8]);
-        let arc = v.q4k_ffn_layer(0, 1).expect("cache hit returns Some");
+        let arc = v.kquant_ffn_layer(0, 1).expect("cache hit returns Some");
         assert_eq!(arc.as_slice(), &[1.0_f32; 8]);
     }
 
@@ -389,7 +389,7 @@ mod tests {
             lru.push_back(2);
         }
         // Hit on layer 0 — moves it to the front.
-        let _ = v.q4k_ffn_layer(0, 0).unwrap();
+        let _ = v.kquant_ffn_layer(0, 0).unwrap();
         let lru = v.ffn.q4k_ffn_cache_lru.lock().unwrap();
         assert_eq!(lru.front().copied(), Some(0), "hit promotes to MRU");
     }
@@ -398,16 +398,16 @@ mod tests {
     fn q4k_ffn_layer_returns_none_with_no_q4k_data() {
         // No interleaved_q4k mmap, no cached entry → None.
         let v = fresh(1, 8);
-        assert!(v.q4k_ffn_layer(0, 0).is_none());
+        assert!(v.kquant_ffn_layer(0, 0).is_none());
     }
 
     #[test]
     fn q4k_ffn_layer_oob_layer_returns_none() {
         let v = fresh(1, 8);
-        assert!(v.q4k_ffn_layer(99, 0).is_none());
+        assert!(v.kquant_ffn_layer(99, 0).is_none());
     }
 
-    // ── q4k_ffn_row_scaled_add_via_cache ───────────────────────────
+    // ── kquant_ffn_row_scaled_add_via_cache ───────────────────────────
 
     #[test]
     fn row_scaled_add_via_cache_writes_alpha_times_row() {
@@ -421,7 +421,7 @@ mod tests {
         );
         let mut out = [10.0_f32, 10.0, 10.0, 10.0];
         // Pull feature index 1, alpha = 0.5 → out += 0.5 * [5, 6, 7, 8].
-        let ok = v.q4k_ffn_row_scaled_add_via_cache(0, 0, 1, 0.5, &mut out);
+        let ok = v.kquant_ffn_row_scaled_add_via_cache(0, 0, 1, 0.5, &mut out);
         assert!(ok);
         assert_eq!(out, [12.5, 13.0, 13.5, 14.0]);
     }
@@ -430,8 +430,8 @@ mod tests {
     fn row_scaled_add_via_cache_returns_false_with_no_cache() {
         let v = fresh(1, 4);
         let mut out = [0.0_f32; 4];
-        // No q4k data, no cache → q4k_ffn_layer returns None → false.
-        assert!(!v.q4k_ffn_row_scaled_add_via_cache(0, 0, 0, 1.0, &mut out));
+        // No q4k data, no cache → kquant_ffn_layer returns None → false.
+        assert!(!v.kquant_ffn_row_scaled_add_via_cache(0, 0, 0, 1.0, &mut out));
     }
 
     #[test]
@@ -440,7 +440,7 @@ mod tests {
         install_cache_entry(&v, 0, 0, vec![0.0_f32; 8]); // 2 features × 4
         let mut out = [0.0_f32; 4];
         // feat=99 → row_end > arc.len() → false.
-        assert!(!v.q4k_ffn_row_scaled_add_via_cache(0, 0, 99, 1.0, &mut out));
+        assert!(!v.kquant_ffn_row_scaled_add_via_cache(0, 0, 99, 1.0, &mut out));
     }
 
     #[test]
@@ -448,21 +448,21 @@ mod tests {
         let v = fresh(1, 4);
         install_cache_entry(&v, 0, 0, vec![0.0_f32; 8]);
         let mut out = [0.0_f32; 7]; // wrong length
-        assert!(!v.q4k_ffn_row_scaled_add_via_cache(0, 0, 0, 1.0, &mut out));
+        assert!(!v.kquant_ffn_row_scaled_add_via_cache(0, 0, 0, 1.0, &mut out));
     }
 
-    // ── q4k_ffn_layer_once early returns ───────────────────────────
+    // ── kquant_ffn_layer_once early returns ───────────────────────────
 
     #[test]
     fn q4k_ffn_layer_once_invalid_component_returns_none() {
         let v = fresh(1, 8);
-        assert!(v.q4k_ffn_layer_once(0, 99).is_none());
+        assert!(v.kquant_ffn_layer_once(0, 99).is_none());
     }
 
     #[test]
     fn q4k_ffn_layer_once_oob_layer_returns_none() {
         let v = fresh(1, 8);
-        assert!(v.q4k_ffn_layer_once(99, 0).is_none());
+        assert!(v.kquant_ffn_layer_once(99, 0).is_none());
     }
 
     #[test]
@@ -470,7 +470,7 @@ mod tests {
         let v = fresh(2, 8);
         // get_or_init runs and the closure returns None → cached
         // permanently as None. Subsequent call also yields None.
-        assert!(v.q4k_ffn_layer_once(0, 0).is_none());
-        assert!(v.q4k_ffn_layer_once(0, 0).is_none());
+        assert!(v.kquant_ffn_layer_once(0, 0).is_none());
+        assert!(v.kquant_ffn_layer_once(0, 0).is_none());
     }
 }

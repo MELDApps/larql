@@ -823,7 +823,7 @@ mod experts {
                     if let Some(ops) = mask_op_names {
                         let mut mask = OpNameMask::new(ops.to_vec(), &self.tokenizer);
                         mask.set_seed_text(OP_CALL_PREFIX);
-                        larql_inference::forward::generate_cached_constrained(
+                        larql_kv::generation::generate_cached_constrained(
                             &self.weights,
                             &self.tokenizer,
                             &ffn,
@@ -833,7 +833,7 @@ mod experts {
                             |_id, tok| text.push_str(tok),
                         );
                     } else {
-                        larql_inference::forward::generate_cached(
+                        larql_kv::generation::generate_cached(
                             &self.weights,
                             &self.tokenizer,
                             &ffn,

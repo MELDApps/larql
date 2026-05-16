@@ -1,7 +1,7 @@
 //! W2 feature-major down emit — transposes the down weights to
 //! `[intermediate, hidden]` orientation and re-quantises at the same
 //! precision the interleaved file uses, so per-feature decode at load
-//! time can skip the `q4k_ffn_layer` cache and serve a single row.
+//! time can skip the `kquant_ffn_layer` cache and serve a single row.
 //!
 //! Lives only during the FFN write loop in
 //! `super::write_model_weights_q4k_with_opts`. Each layer's down call
@@ -47,7 +47,7 @@ impl FeatureMajorDownState {
     /// Transpose padded down (`[hidden, padded_intermediate]`) to
     /// feature-major (`[padded_intermediate, padded_hidden]`),
     /// re-pad rows to 256, and quantise at `format`. Mirrors the
-    /// orientation used by `q4k_ffn_layer`'s in-memory transpose so
+    /// orientation used by `kquant_ffn_layer`'s in-memory transpose so
     /// the runtime decode path reads the same byte layout.
     pub(crate) fn append_layer(
         &mut self,
@@ -72,6 +72,12 @@ impl FeatureMajorDownState {
         let bytes = match format {
             QuantBlockFormat::Q6K => quantize_q6_k(&fm_padded),
             QuantBlockFormat::Q4K => quantize_q4_k(&fm_padded),
+            QuantBlockFormat::Other(ref tag) => {
+                return Err(VindexError::Parse(format!(
+                    "feature-major-down writer cannot emit format {tag:?}; \
+                     add an encode function and a typed variant first"
+                )));
+            }
         };
         self.file.write_all(&bytes)?;
         let length = bytes.len() as u64;

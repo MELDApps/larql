@@ -329,7 +329,7 @@ fn build_layers<'a>(
     num_layers: usize,
 ) -> Result<Vec<larql_compute::FullPipelineLayer<'a>>, Box<dyn std::error::Error>> {
     let gate_index: &dyn larql_vindex::GateIndex = index;
-    let (q4_ffn, ffn_is_q4k) = if let Some(mmap) = gate_index.interleaved_q4k_mmap_ref() {
+    let (q4_ffn, ffn_is_q4k) = if let Some(mmap) = gate_index.interleaved_kquant_mmap_ref() {
         (Some(mmap), true)
     } else {
         (gate_index.interleaved_q4_mmap_ref(), false)

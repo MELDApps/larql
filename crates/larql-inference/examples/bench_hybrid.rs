@@ -52,8 +52,8 @@ fn main() {
 
     let gate_index: &dyn larql_vindex::GateIndex = &index;
     eprintln!("  down_features: {}", gate_index.has_down_features());
-    eprintln!("  attn Q4K: {}", index.attn_q4k_layer_data(0).is_some());
-    eprintln!("  interleaved Q4K: {}", gate_index.has_interleaved_q4k());
+    eprintln!("  attn Q4K: {}", index.attn_kquant_layer_data(0).is_some());
+    eprintln!("  interleaved Q4K: {}", gate_index.has_interleaved_kquant());
     eprintln!(
         "  interleaved Q4: {}",
         gate_index.interleaved_q4_mmap_ref().is_some()

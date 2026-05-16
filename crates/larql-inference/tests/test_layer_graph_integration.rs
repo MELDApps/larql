@@ -203,7 +203,7 @@ fn build_pipeline_layers_produces_all_layers() {
 
     let gate_index: &dyn larql_vindex::GateIndex = &q4_index;
     let q4_ffn = gate_index
-        .interleaved_q4k_mmap_ref()
+        .interleaved_kquant_mmap_ref()
         .expect("Q4K FFN mmap required");
     let ffn_is_q4k = true;
     let hidden = weights.hidden_size;

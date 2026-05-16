@@ -951,7 +951,7 @@ pub async fn handle_walk_ffn_q8k(
         // Require interleaved Q4K to serve this endpoint.
         let has_q4k = {
             let patched = model.patched.blocking_read();
-            patched.base().interleaved_q4k_mmap_ref().is_some()
+            patched.base().interleaved_kquant_mmap_ref().is_some()
         };
         if !has_q4k {
             return Err(crate::error::ServerError::NotFound(
@@ -979,7 +979,7 @@ pub async fn handle_walk_ffn_q8k(
                 let layer_bufs = model.metal_ffn_layer_bufs.get_or_init(|| {
                     (0..model.config.num_layers)
                         .filter_map(|l| {
-                            let data = patched.base().interleaved_q4k_layer_data(l)?;
+                            let data = patched.base().interleaved_kquant_layer_data(l)?;
                             let gate_buf = backend.bufs().get_bytes(data[0].0);
                             let up_buf = backend.bufs().get_bytes(data[1].0);
                             let down_buf = backend.bufs().get_bytes(data[2].0);

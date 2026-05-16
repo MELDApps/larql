@@ -11,8 +11,12 @@
 extern crate blas_src;
 
 pub mod accuracy;
+pub mod cache;
 pub mod engines;
+pub mod generation;
 pub mod profiler;
+
+pub use cache::KvCache;
 
 pub use engines::apollo;
 pub use engines::markov_residual;

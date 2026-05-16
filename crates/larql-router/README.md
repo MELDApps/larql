@@ -247,6 +247,20 @@ work** against an inference compute budget orders of magnitude
 larger. Routing is not the bottleneck even at trillion-parameter
 MoE scale.
 
+**ADR-0020 saturation filter overhead** (`route()` on a
+`(10 shards × 2 replicas)` production-shape topology):
+
+| Mode | Time |
+|---|---|
+| `ceiling=None` (baseline) | 113 ns |
+| `ceiling=Some(16)`, no replica saturated | 108 ns |
+| `ceiling=Some(4)`, every replica saturated → `None` | 57 ns |
+
+The saturation filter costs nothing measurable on the happy path
+(both modes are within noise of the baseline), and the all-saturated
+short-circuit is actually faster than the comparator path because no
+`min_by` runs. So `--saturation-ceiling N` is free to enable.
+
 ```bash
 make bench-routing     # criterion sweeps; see crates/larql-router/benches/routing.rs
 ```
@@ -347,10 +361,12 @@ Runnable demos under [`examples/`](./examples/):
 | `static_shards_server` | Minimal HTTP router with a hard-coded shard map — `parse_shards` + `build_router` + `axum::serve`. The smallest possible deployment shape. |
 | `admin_client` | Calls `admin_status` / `admin_drain` / `admin_assign` from Rust against a running router — the same code paths the CLI uses, but reusable from your own ops tooling. |
 | `fanout_dispatch` | The dispatch building blocks (`resolve_static_only`, `group_layers_by_url`, `build_subrequest_body`, `merge_shard_responses`) on a synthetic multi-layer request — no network. |
+| `saturation_backpressure` | ADR-0020 in isolation: drives a `GridState` through ceiling=None, ceiling-with-headroom, one-saturated, all-saturated, no-owner scenarios so you can see when `route()` flips to `None` and which HTTP status the dispatcher will emit (200 / 400 / 503). |
 
 ```bash
 cargo run -p larql-router --example embed_grid
 cargo run -p larql-router --example fanout_dispatch
+cargo run -p larql-router --example saturation_backpressure
 cargo run -p larql-router --example static_shards_server   # listens on :9090
 cargo run -p larql-router --example admin_client           # needs a router on :50052
 ```

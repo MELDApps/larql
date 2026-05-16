@@ -8,11 +8,11 @@
 //! | 1 | `index.has_overrides_at(layer)`                      | `override:sparse`            |
 //! | 2 | `config.is_sparse(layer)`                            | `sparse:*`                   |
 //! | 3 | `index.has_fp4_storage()`                            | `fp4_storage:sparse`         |
-//! | 4 | `has_interleaved_q4k()` + gated FFN                  | `interleaved_q4k:native`     |
+//! | 4 | `has_interleaved_kquant()` + gated FFN               | `interleaved_kquant:native`  |
 //! | 5 | `has_interleaved_q4()` + backend has Q4              | `interleaved_q4:*`           |
 //! | 6 | `has_interleaved()`                                  | `interleaved`                |
 //! | 7 | `has_full_mmap_ffn()`                                | `full_mmap`                  |
-//! | 8 | `has_interleaved_q4k()`                              | `interleaved_q4k:dequant`    |
+//! | 8 | `has_interleaved_kquant()`                           | `interleaved_kquant:dequant` |
 //! | 9 | `has_down_features()` + safetensors weights loaded   | `exact`                      |
 //! | 10| Fallback: sparse matmul against safetensors weights  | `weights_fallback:*`         |
 //!
@@ -25,14 +25,14 @@
 //!
 //! Each walk path lives in its own module under this directory:
 //!
-//! - `sparse.rs`                — per-feature walk, unified ffn_row_* dispatch
-//! - `interleaved.rs`           — f32 interleaved mmap, three BLAS gemms
-//! - `interleaved_q4.rs`        — Q4_0 interleaved, CPU kernel / Metal Q4
-//! - `interleaved_q4k_native.rs`— Q4K direct matvec, no dequant cache
-//! - `interleaved_q4k.rs`       — Q4K dequant, full f32 dense after decode
-//! - `full_mmap.rs`             — gate/up/down in three separate mmap files
-//! - `exact.rs`                 — gate/up from safetensors, down from mmap
-//! - `helpers.rs`               — cross-path utilities + trace metadata
+//! - `sparse.rs`                  — per-feature walk, unified ffn_row_* dispatch
+//! - `interleaved.rs`             — f32 interleaved mmap, three BLAS gemms
+//! - `interleaved_q4.rs`            — Q4_0 interleaved, CPU kernel / Metal Q4
+//! - `interleaved_kquant_native.rs` — K-quant direct matvec, no dequant cache
+//! - `interleaved_kquant_dequant.rs`— K-quant dequant, full f32 dense after decode
+//! - `full_mmap.rs`               — gate/up/down in three separate mmap files
+//! - `exact.rs`                   — gate/up from safetensors, down from mmap
+//! - `helpers.rs`                 — cross-path utilities + trace metadata
 //!
 //! Adding a new storage format should almost never touch `mod.rs` — add
 //! a new module with a single walk function, one branch in the routing
@@ -54,8 +54,8 @@ mod full_mmap;
 mod helpers;
 mod interleaved;
 mod interleaved_q4;
-mod interleaved_q4k;
-mod interleaved_q4k_native;
+mod interleaved_kquant_dequant;
+mod interleaved_kquant_native;
 mod sparse;
 
 #[cfg(test)]
@@ -333,12 +333,12 @@ impl<'a> FfnBackend for WalkFfn<'a> {
                 }
             }
 
-            // 4. Q4K native — direct matvec via `q4k_matmul_transb`. Same
+            // 4. Q4K native — direct matvec via `kquant_matmul_transb`. Same
             //    kernel `ffn_decode_step_native` uses. Goes ahead of Q4_0 /
             //    f32 interleaved / full_mmap / dequant because for a vindex
             //    that has both Q4K and one of those, this is the fast path.
-            if self.index.has_interleaved_q4k() {
-                if let Some(r) = self.walk_ffn_q4k_native(layer, x) {
+            if self.index.has_interleaved_kquant() {
+                if let Some(r) = self.walk_ffn_kquant_native(layer, x) {
                     break 'routing r;
                 }
             }
@@ -365,9 +365,9 @@ impl<'a> FfnBackend for WalkFfn<'a> {
             }
 
             // 8. Q4K interleaved dequant — fallback for non-gated archs and
-            //    any case where `walk_ffn_q4k_native` returns `None`.
-            if self.index.has_interleaved_q4k() {
-                if let Some(r) = self.walk_ffn_q4k_dequant(layer, x) {
+            //    any case where `walk_ffn_kquant_native` returns `None`.
+            if self.index.has_interleaved_kquant() {
+                if let Some(r) = self.walk_ffn_kquant_dequant(layer, x) {
                     break 'routing r;
                 }
             }

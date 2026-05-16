@@ -92,8 +92,8 @@ fn bench_decode_step(c: &mut Criterion) {
 /// If `Standard` is a parity-preserving wrapper, this benchmark
 /// quantifies the dispatch-trait overhead — should be a wash.
 fn bench_engine_vs_legacy_generation(c: &mut Criterion) {
-    use larql_inference::forward::{generate_cached_backend, generate_with_engine};
     use larql_inference::test_utils::make_test_tokenizer;
+    use larql_kv::generation::{generate_cached_backend, generate_with_engine};
     use larql_kv::StandardEngine;
 
     let weights = make_test_weights();

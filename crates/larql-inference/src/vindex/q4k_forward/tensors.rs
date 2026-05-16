@@ -15,10 +15,10 @@ pub fn insert_q4k_layer_tensors(
     layer: usize,
 ) -> Result<Vec<String>, String> {
     let attn = index
-        .attn_q4k_layer_data(layer)
+        .attn_kquant_layer_data(layer)
         .ok_or_else(|| format!("attn Q4K slices missing for layer {layer}"))?;
     let ffn = index
-        .interleaved_q4k_layer_data(layer)
+        .interleaved_kquant_layer_data(layer)
         .ok_or_else(|| format!("ffn Q4K slices missing for layer {layer}"))?;
 
     let arch = &*weights.arch;

@@ -115,8 +115,8 @@ impl KvHandle {
 
 /// Backend-side trait for K/V handle inner types. Backends implement
 /// this on whatever GPU-side or host-side allocation they manage
-/// (`MTLBuffer`, `VkBuffer`, `Vec<f32>`, or a wrapper over the
-/// existing `larql_inference::attention::KvCache`).
+/// (`MTLBuffer`, `VkBuffer`, `Vec<f32>`, or a wrapper over an engine's
+/// `KvCache` from `larql-kv`).
 pub trait KvHandleInner: Send + Sync + std::any::Any {
     fn cached_len(&self) -> usize;
     fn kv_dim(&self) -> usize;

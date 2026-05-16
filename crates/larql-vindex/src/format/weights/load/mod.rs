@@ -135,8 +135,8 @@ pub fn load_model_weights_with_opts(
 ///
 /// Q4 vindexes store attn / FFN weights as packed blocks in
 /// `attn_weights_q4k.bin` and `interleaved_q4k.bin`; the forward pass reads
-/// those through [`crate::index::VectorIndex::attn_q4k_layer_data`] /
-/// [`crate::index::VectorIndex::interleaved_q4k_layer_data`] and
+/// those through [`crate::index::VectorIndex::attn_kquant_layer_data`] /
+/// [`crate::index::VectorIndex::interleaved_kquant_layer_data`] and
 /// dequantises on demand, so the `ModelWeights.tensors` map stays empty.
 pub fn load_model_weights_q4k(
     dir: &Path,

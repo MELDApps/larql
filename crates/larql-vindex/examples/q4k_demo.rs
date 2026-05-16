@@ -163,7 +163,7 @@ fn main() {
     let mut lcb = larql_vindex::SilentLoadCallbacks;
     let mut index = larql_vindex::VectorIndex::load_vindex(&out_q4k, &mut lcb).unwrap();
     index.load_attn_q4k(&out_q4k).unwrap();
-    let slices = index.attn_q4k_layer_data(0).expect("layer 0 slices");
+    let slices = index.attn_kquant_layer_data(0).expect("layer 0 slices");
     let (q_bytes, q_format) = slices[0];
     let n_elements = hidden * hidden; // Q shape [hidden, hidden]
                                       // Dequant reads from the raw slab; padded tail beyond n_elements

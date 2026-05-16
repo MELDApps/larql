@@ -1,4 +1,4 @@
-//! Native Q4_K/Q6_K FFN walk — fused decode + dot via `q4k_matmul_transb`.
+//! Native Q4_K/Q6_K FFN walk — fused decode + dot via `kquant_matmul_transb`.
 //!
 //! Mirrors the inner gated-FFN block of [`crate::vindex::ffn_decode_step_native`]
 //! (q4k_forward/cached.rs) but operates as an `FfnBackend`: input is already
@@ -7,7 +7,7 @@
 //!
 //! Per-row Q4K decode is fused into the matvec — no whole-layer dequant cache,
 //! no f32 staging. On Gemma 3 4B Q4K this is ~5× faster than
-//! `walk_ffn_q4k_dequant` because the dequant path materialises three full
+//! `walk_ffn_kquant_dequant` because the dequant path materialises three full
 //! f32 matrices (gate + up + down, ~120 MB) on every forward call.
 //!
 //! Position in the routing ladder: priority 4 (after overrides, explicit
@@ -24,7 +24,7 @@ impl<'a> WalkFfn<'a> {
     /// Q4K bytes for this layer or the arch isn't a Gated FFN (the only
     /// shape the matvec kernel supports today). Caller falls through to
     /// the next branch.
-    pub(super) fn walk_ffn_q4k_native(
+    pub(super) fn walk_ffn_kquant_native(
         &self,
         layer: usize,
         x: &Array2<f32>,
@@ -36,10 +36,10 @@ impl<'a> WalkFfn<'a> {
             return None;
         }
 
-        // Require Q4K FFN bytes for this layer. `interleaved_q4k_layer_data`
-        // returning `None` is the same precondition `q4k_matmul_transb`
+        // Require Q4K FFN bytes for this layer. `interleaved_kquant_layer_data`
+        // returning `None` is the same precondition `kquant_matmul_transb`
         // checks — fail fast rather than letting it report `None` later.
-        let _ = self.index.interleaved_q4k_layer_data(layer)?;
+        let _ = self.index.interleaved_kquant_layer_data(layer)?;
 
         let seq_len = x.shape()[0];
         let hidden = x.shape()[1];
@@ -53,16 +53,16 @@ impl<'a> WalkFfn<'a> {
 
         // Stream next layer's Q4K data while we compute this one — same
         // trick the dequant path uses.
-        self.index.prefetch_interleaved_q4k_layer(layer + 1);
+        self.index.prefetch_interleaved_kquant_layer(layer + 1);
 
         // Gate (component 0) and up (component 1) — both [intermediate, hidden].
         let x_flat = x.as_slice()?;
         let gate_flat = self
             .index
-            .q4k_matmul_transb(layer, 0, x_flat, seq_len, self.backend)?;
+            .kquant_matmul_transb(layer, 0, x_flat, seq_len, self.backend)?;
         let up_flat = self
             .index
-            .q4k_matmul_transb(layer, 1, x_flat, seq_len, self.backend)?;
+            .kquant_matmul_transb(layer, 1, x_flat, seq_len, self.backend)?;
         let gate = Array2::from_shape_vec((seq_len, intermediate), gate_flat).ok()?;
         let up = Array2::from_shape_vec((seq_len, intermediate), up_flat).ok()?;
 
@@ -82,10 +82,10 @@ impl<'a> WalkFfn<'a> {
         let act_flat = activation.as_slice()?;
         let down_flat = self
             .index
-            .q4k_matmul_transb(layer, 2, act_flat, seq_len, self.backend)?;
+            .kquant_matmul_transb(layer, 2, act_flat, seq_len, self.backend)?;
         let out = Array2::from_shape_vec((seq_len, hidden), down_flat).ok()?;
 
-        self.trace_path(layer, "interleaved_q4k:native");
+        self.trace_path(layer, "interleaved_kquant:native");
         Some((out, activation))
     }
 }
@@ -95,7 +95,7 @@ mod tests {
     //! Coverage for the Q4_K native walk path. Uses `Q4KTestFixtures`
     //! (hidden=256, intermediate=256, Gemma 3 arch) — the closest in-
     //! process analogue of a real Q4K-only vindex. All assertions
-    //! compare against `walk_ffn_q4k_dequant`, which decodes the same
+    //! compare against `walk_ffn_kquant_dequant`, which decodes the same
     //! bytes through an independent kernel; matching outputs prove the
     //! native path produces the same FFN output the dequant path does
     //! (both consume the *same* Q4K bytes — equality is the right bar).
@@ -130,7 +130,7 @@ mod tests {
         walk.forward(0, &x);
         let trace = walk.take_dispatch_trace();
         assert_eq!(trace.len(), 1);
-        assert_eq!(trace[0].path, "interleaved_q4k:native");
+        assert_eq!(trace[0].path, "interleaved_kquant:native");
     }
 
     #[test]
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn q4k_native_output_matches_dequant_path() {
-        // The dequant path (`walk_ffn_q4k_dequant`) is the ground-truth
+        // The dequant path (`walk_ffn_kquant_dequant`) is the ground-truth
         // baseline — it materialises full f32 gate/up/down then runs
         // dense matmul. Native does the same math via fused decode +
         // dot. Outputs must match within a tight tolerance (decode
@@ -168,10 +168,10 @@ mod tests {
         let x = input(1, f.weights.hidden_size);
 
         let native = walk
-            .walk_ffn_q4k_native(0, &x)
+            .walk_ffn_kquant_native(0, &x)
             .expect("native path must succeed on Q4K fixture");
         let dequant = walk
-            .walk_ffn_q4k_dequant(0, &x)
+            .walk_ffn_kquant_dequant(0, &x)
             .expect("dequant path must succeed on Q4K fixture");
 
         assert_eq!(native.0.shape(), dequant.0.shape());
@@ -190,13 +190,13 @@ mod tests {
         // finite values for a single-token input. The fixture uses
         // small-scale weights (rand_mat_seeded with scale=0.05) so the
         // activations stay well-bounded — any NaN/Inf here indicates
-        // a kernel-level regression in `q4k_matmul_transb` or
+        // a kernel-level regression in `kquant_matmul_transb` or
         // `gelu_tanh_gate_up`.
         let f = fx();
         let walk = WalkFfn::new_unlimited(&f.weights, &f.index);
         let x = input(1, f.weights.hidden_size);
         let (out, _) = walk
-            .walk_ffn_q4k_native(0, &x)
+            .walk_ffn_kquant_native(0, &x)
             .expect("native path must succeed on Q4K fixture");
         assert!(out.iter().all(|v| v.is_finite()), "FFN output has NaN/Inf");
     }
@@ -205,14 +205,14 @@ mod tests {
     fn q4k_native_handles_multi_token_input() {
         // Prefill-style multi-token input. WalkFfn::forward operates on
         // `[seq_len, hidden]` — the native path must propagate seq_len
-        // through `q4k_matmul_transb` correctly. Without this test a
+        // through `kquant_matmul_transb` correctly. Without this test a
         // regression that flattens to seq=1 would only surface on
         // prefill-heavy workloads.
         let f = fx();
         let walk = WalkFfn::new_unlimited(&f.weights, &f.index);
         let x = input(3, f.weights.hidden_size);
         let (out, _) = walk
-            .walk_ffn_q4k_native(0, &x)
+            .walk_ffn_kquant_native(0, &x)
             .expect("native path must succeed for seq_len=3");
         assert_eq!(out.shape(), &[3, f.weights.hidden_size]);
         assert!(out.iter().all(|v| v.is_finite()));
@@ -220,13 +220,13 @@ mod tests {
 
     #[test]
     fn q4k_native_returns_none_without_q4k_bytes() {
-        // No Q4K bytes installed → `interleaved_q4k_layer_data` is
+        // No Q4K bytes installed → `interleaved_kquant_layer_data` is
         // None → native path returns None and caller falls through.
         // Uses the non-Q4K test fixture from `test_utils::TestFixtures`,
         // which has only safetensors weights.
         let fx = crate::test_utils::TestFixtures::build();
         let walk = WalkFfn::new_unlimited(&fx.weights, &fx.index);
         let x = input(1, fx.weights.hidden_size);
-        assert!(walk.walk_ffn_q4k_native(0, &x).is_none());
+        assert!(walk.walk_ffn_kquant_native(0, &x).is_none());
     }
 }

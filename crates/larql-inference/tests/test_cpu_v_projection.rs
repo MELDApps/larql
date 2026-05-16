@@ -158,7 +158,7 @@ fn cpu_q4k_load_produces_distinct_w_k_and_w_v_for_gemma4_global() {
 
     let layer: usize = 5;
     let attn = index
-        .attn_q4k_layer_data(layer)
+        .attn_kquant_layer_data(layer)
         .expect("L5 attn slices present");
     // attn is [q, k, v, o] — verify shapes match the expected global
     // dims before we dequant (head_dim=512, num_q=32, num_kv=4, hidden=5376).

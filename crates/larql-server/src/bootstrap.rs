@@ -212,9 +212,9 @@ pub fn load_single_vindex(
         if let Ok(()) = index.load_up_features(&path) {
             info!("  Up features: loaded (full mmap FFN)")
         }
-        if index.has_down_features_q4k() {
+        if index.has_down_features_kquant() {
             info!(
-                "  Down features Q4K: loaded (W2 — per-feature decode skips q4k_ffn_layer cache)"
+                "  Down features Q4K: loaded (W2 — per-feature decode skips kquant_ffn_layer cache)"
             );
         }
 

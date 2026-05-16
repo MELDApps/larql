@@ -109,7 +109,7 @@ impl QuantizedFfnAccess for MockIndex {
         None
     }
 
-    fn has_interleaved_q4k(&self) -> bool {
+    fn has_interleaved_kquant(&self) -> bool {
         self.has_q4k
     }
 }
@@ -194,7 +194,7 @@ fn predicate_priority_ordering() {
         // walker falls through to dequant (priority 8) — this predicate
         // models the expected reachable path on success.
         if m.has_q4k {
-            return "interleaved_q4k:native";
+            return "interleaved_kquant:native";
         }
         if m.has_q4_interleaved && backend_has_q4 {
             return "interleaved_q4:*";
@@ -245,7 +245,7 @@ fn predicate_priority_ordering() {
     m.has_q4_interleaved = true;
     m.has_interleaved = true;
     m.has_full_mmap = true;
-    assert_eq!(pick_path(&m, false, true), "interleaved_q4k:native");
+    assert_eq!(pick_path(&m, false, true), "interleaved_kquant:native");
 
     // 5. Q4 interleaved fires only with GPU Q4, and only when Q4K
     //    isn't present.
@@ -278,7 +278,7 @@ fn predicate_priority_ordering() {
     let mut m = MockIndex::new(hidden, intermediate);
     m.has_q4k = true;
     m.has_down_features = true;
-    assert_eq!(pick_path(&m, false, false), "interleaved_q4k:native");
+    assert_eq!(pick_path(&m, false, false), "interleaved_kquant:native");
 
     // 9. exact wins over last-resort weights fallback.
     let mut m = MockIndex::new(hidden, intermediate);
@@ -307,7 +307,7 @@ fn fp4_vindex_with_no_other_backends_picks_fp4_path() {
             return "fp4_storage:sparse";
         }
         if m.has_q4k {
-            return "interleaved_q4k:native";
+            return "interleaved_kquant:native";
         }
         if m.has_q4_interleaved {
             return "interleaved_q4:*";

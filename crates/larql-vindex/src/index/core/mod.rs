@@ -228,9 +228,9 @@ mod refactor_tests {
         assert!(v.metadata.up_overrides.is_empty());
 
         // Storage façade — empty MmapStorage on a freshly-empty index.
-        assert!(!v.storage.has_interleaved_q4k());
+        assert!(!v.storage.has_interleaved_kquant());
         assert!(!v.storage.has_interleaved_q4());
-        assert!(!v.storage.has_attn_q4k());
+        assert!(!v.storage.has_attn_kquant());
         assert!(!v.storage.has_attn_q4());
         assert!(!v.storage.has_attn_q8());
         assert!(!v.storage.has_lm_head_q4());
@@ -238,8 +238,8 @@ mod refactor_tests {
         assert!(!v.storage.has_lm_head_f32());
         assert!(!v.storage.has_gate_vectors());
         assert!(!v.storage.has_gate_q4());
-        assert!(v.storage.interleaved_q4k_whole_buffer().is_none());
-        assert!(v.storage.attn_q4k_layer_data(0).is_none());
+        assert!(v.storage.interleaved_kquant_whole_buffer().is_none());
+        assert!(v.storage.attn_kquant_layer_data(0).is_none());
         assert!(v.storage.lm_head_q4_bytes().is_none());
     }
 

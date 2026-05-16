@@ -39,7 +39,7 @@ pub struct Q4kConvertConfig {
     /// tradeoff.
     pub down_q4k: bool,
     /// Emit `down_features_q4k.bin` (W2 feature-major down) so per-feature
-    /// row decode can skip the `q4k_ffn_layer` cache. Disk grows by
+    /// row decode can skip the `kquant_ffn_layer` cache. Disk grows by
     /// roughly one extra down-leg per layer; load-time RSS drops because
     /// the cache stays empty. See `Q4kWriteOptions::feature_major_down`.
     pub feature_major_down: bool,
@@ -374,7 +374,7 @@ pub fn add_feature_major_down(vindex_dir: &Path) -> Result<AddFeatureMajorDownRe
     // Down is the third entry per layer ([gate, up, down] in the writer).
     for layer in 0..num_layers {
         let down = &entries[layer * FFN_COMPONENTS_PER_LAYER + FFN_DOWN];
-        let format = down.format;
+        let format = down.format.clone();
         let info = crate::quant::registry::lookup(down.format_tag()).ok_or_else(|| {
             VindexError::Parse(format!(
                 "unknown quant format {:?} in {INTERLEAVED_Q4K_MANIFEST_JSON} for layer {layer}",

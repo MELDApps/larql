@@ -29,12 +29,12 @@ pub(super) fn build_grid_pipeline_setup<'a>(
     let num_layers = weights.num_layers;
     let gate_index: &dyn larql_vindex::GateIndex = index;
     let q4_ffn = gate_index
-        .interleaved_q4k_mmap_ref()
+        .interleaved_kquant_mmap_ref()
         .or_else(|| gate_index.interleaved_q4_mmap_ref())
         .ok_or_else(|| {
             RemoteMoeError::BadResponse("no interleaved Q4 FFN mmap in vindex".into())
         })?;
-    let ffn_format = if gate_index.interleaved_q4k_mmap_ref().is_some() {
+    let ffn_format = if gate_index.interleaved_kquant_mmap_ref().is_some() {
         larql_compute::QuantFormat::Q4_K
     } else {
         larql_compute::QuantFormat::Q4_0

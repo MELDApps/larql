@@ -33,9 +33,10 @@
 //!   raw `project_through_unembed` (DLA without final norm).
 //! - [`forward::patching`] — donor/recipient activation patching built on
 //!   the hook surface.
-//! - [`attention::KvCache`] — `get_layer` / `set_layer` /
+//! - `larql_kv::KvCache` — `get_layer` / `set_layer` /
 //!   `clone_layer_position_range` for KV-cache surgery (e.g. lazarus's
-//!   `prefill_inject` and `kv_inject_test`).
+//!   `prefill_inject` and `kv_inject_test`). Lives in `larql-kv` since
+//!   2026-05-16 — it is engine state, not substrate.
 //!
 //! See `examples/mech_interp_demo.rs` for an end-to-end walkthrough on
 //! synthetic weights (no vindex required).
@@ -197,12 +198,12 @@ pub use kv_engine::{DecodeStageSummary, EngineInfo, KvEngine};
 // accessible via `larql_inference::forward::*` and `research::*`.
 pub use forward::{
     apply_knn_override, calibrate_scalar_gains, capture_decoy_residuals, capture_residuals,
-    capture_spec_residuals, forward_from_layer, forward_to_layer, generate_cached_constrained,
-    hidden_to_raw_logits, infer_patched, logit_lens_top1, predict, predict_from_hidden,
-    predict_with_ffn, predict_with_ffn_attention, predict_with_router, predict_with_strategy,
-    run_memit, run_memit_with_target_opt, trace_forward, trace_forward_full,
-    walk_trace_from_residuals, InferenceWeights, KnnOverride, LayerAttentionCapture, MemitFact,
-    MemitResult, PredictResult, TargetDeltaOpts,
+    capture_spec_residuals, forward_from_layer, forward_to_layer, hidden_to_raw_logits,
+    infer_patched, logit_lens_top1, predict, predict_from_hidden, predict_with_ffn,
+    predict_with_ffn_attention, predict_with_router, predict_with_strategy, run_memit,
+    run_memit_with_target_opt, trace_forward, trace_forward_full, walk_trace_from_residuals,
+    InferenceWeights, KnnOverride, LayerAttentionCapture, MemitFact, MemitResult, PredictResult,
+    TargetDeltaOpts,
 };
 // Crate-root layer_graph re-exports — kept for any name with external use
 // OR in-crate examples/tests/benches that import via the root. Truly-unused
@@ -301,8 +302,8 @@ pub mod research {
         apply_knn_override, calibrate_scalar_gains, capture_decoy_residuals,
         capture_ffn_activation_matrix, capture_residuals, capture_spec_residuals,
         estimate_ffn_covariance, forward_from_layer, forward_raw_logits, forward_to_layer,
-        generate_cached_constrained, hidden_to_raw_logits, infer_patched, infer_patched_q4k,
-        logit_lens_top1, predict_from_hidden, predict_from_hidden_with_ffn, predict_with_ffn,
+        hidden_to_raw_logits, infer_patched, infer_patched_q4k, logit_lens_top1,
+        predict_from_hidden, predict_from_hidden_with_ffn, predict_with_ffn,
         predict_with_ffn_attention, predict_with_ffn_trace, predict_with_router,
         predict_with_strategy, run_memit, run_memit_with_target_opt, trace_forward,
         trace_forward_full, trace_forward_with_ffn, walk_trace_from_residuals, InferPatchedResult,

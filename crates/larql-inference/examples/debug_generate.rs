@@ -19,10 +19,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Backend: {} (has_q4={})", backend.name(), backend.has_q4());
     println!(
         "has_q4k attn L0: {}",
-        index.attn_q4k_layer_data(0).is_some()
+        index.attn_kquant_layer_data(0).is_some()
     );
     println!("has_q8 attn L0: {}", index.attn_q8_layer_data(0).is_some());
-    println!("interleaved Q4K: {}", gate_index.has_interleaved_q4k());
+    println!("interleaved Q4K: {}", gate_index.has_interleaved_kquant());
     println!(
         "interleaved Q4: {}",
         gate_index.interleaved_q4_mmap_ref().is_some()
@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("down_features: {}", gate_index.has_down_features());
 
     // Check what predict_honest does
-    let (q4_ffn, ffn_is_q4k) = if let Some(mmap) = gate_index.interleaved_q4k_mmap_ref() {
+    let (q4_ffn, ffn_is_q4k) = if let Some(mmap) = gate_index.interleaved_kquant_mmap_ref() {
         (Some(mmap), true)
     } else {
         (gate_index.interleaved_q4_mmap_ref(), false)
@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         q4_ffn.is_some()
     );
 
-    let has_q4k_attn = index.attn_q4k_layer_data(0).is_some();
+    let has_q4k_attn = index.attn_kquant_layer_data(0).is_some();
     let has_q8_attn = index.attn_q8_layer_data(0).is_some();
     println!("Attn data: q4k={has_q4k_attn}, q8={has_q8_attn}");
 

@@ -87,7 +87,7 @@ pub(super) fn write_interleaved_ffn_q4k(
                 ff_manifest.push(Q4kManifestEntry {
                     key: key.clone(),
                     shape: vec![rows, padded_cols],
-                    format,
+                    format: format.clone(),
                     offset: ff_offset,
                     length,
                 });

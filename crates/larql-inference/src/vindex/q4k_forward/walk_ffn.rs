@@ -20,14 +20,14 @@ pub fn q4k_ffn_forward_layer(
     let hidden = x.shape()[1];
     let intermediate = index.num_features(layer);
 
-    let ffn = index.interleaved_q4k_layer_data(layer).unwrap_or_else(|| {
+    let ffn = index.interleaved_kquant_layer_data(layer).unwrap_or_else(|| {
         panic!(
             "interleaved_q4k layer data missing for layer {layer} - \
              server must call `load_interleaved_q4k` before serving walk-ffn"
         )
     });
 
-    let gate = if let Some(arc) = index.q4k_ffn_layer_once(layer, 0) {
+    let gate = if let Some(arc) = index.kquant_ffn_layer_once(layer, 0) {
         let w_gate =
             ndarray::ArrayView2::from_shape((intermediate, hidden), &arc[..intermediate * hidden])
                 .expect("gate cache shape");
@@ -36,7 +36,7 @@ pub fn q4k_ffn_forward_layer(
         let w_gate = dequantize_matrix(ffn[0].0, ffn[0].1, intermediate, hidden);
         dot_proj(x, &w_gate)
     };
-    let up = if let Some(arc) = index.q4k_ffn_layer_once(layer, 1) {
+    let up = if let Some(arc) = index.kquant_ffn_layer_once(layer, 1) {
         let w_up =
             ndarray::ArrayView2::from_shape((intermediate, hidden), &arc[..intermediate * hidden])
                 .expect("up cache shape");
@@ -53,7 +53,7 @@ pub fn q4k_ffn_forward_layer(
     };
     // Down projection: use LRU dequant cache (component=2 stores feature-major = w_down^T).
     let n = intermediate * hidden;
-    if let Some(arc) = index.q4k_ffn_layer_once(layer, 2) {
+    if let Some(arc) = index.kquant_ffn_layer_once(layer, 2) {
         let w_down_t = ndarray::ArrayView2::from_shape((intermediate, hidden), &arc[..n])
             .expect("down cache shape");
         activation.dot(&w_down_t)
@@ -91,7 +91,7 @@ pub fn q4k_ffn_forward_layer_q8k(
     let hidden = h_q8k.qs.len(); // = n_blocks * 256
     let intermediate = index.num_features(layer);
 
-    let ffn = index.interleaved_q4k_layer_data(layer).unwrap_or_else(|| {
+    let ffn = index.interleaved_kquant_layer_data(layer).unwrap_or_else(|| {
         panic!(
             "interleaved_q4k layer data missing for layer {layer} - \
              server must call `load_interleaved_q4k` before serving walk-ffn-q8k"
@@ -137,7 +137,7 @@ pub fn q4k_ffn_forward_layer_q8k(
     } else {
         // Fallback: OnceLock cache + ndarray dot for non-256-aligned intermediate.
         let n = intermediate * hidden;
-        if let Some(arc) = index.q4k_ffn_layer_once(layer, 2) {
+        if let Some(arc) = index.kquant_ffn_layer_once(layer, 2) {
             let w_down_t = ndarray::ArrayView2::from_shape((intermediate, hidden), &arc[..n])
                 .expect("down cache shape");
             activation.dot(&w_down_t)

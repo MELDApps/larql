@@ -42,7 +42,7 @@ pub fn predict_q4k_hidden_with_ffn(
 
     for layer in 0..num_layers {
         let attn = index
-            .attn_q4k_layer_data(layer)
+            .attn_kquant_layer_data(layer)
             .unwrap_or_else(|| panic!("attn Q4K slices missing for layer {layer}"));
 
         let arch = &*weights.arch;

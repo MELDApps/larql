@@ -28,7 +28,7 @@ pub fn predict_q4k_metal(
             let (wq, wk, wv, wo) =
                 resolve_attn_weights(index, layer).expect("attn Q4K slices missing for layer");
             let [(gate_bytes, gate_fmt), (up_bytes, up_fmt), (down_bytes, down_fmt)] = index
-                .interleaved_q4k_layer_data(layer)
+                .interleaved_kquant_layer_data(layer)
                 .expect("ffn Q4K slices missing for layer");
             fn to_format(s: &str) -> QuantFormat {
                 match s {
@@ -117,7 +117,7 @@ pub fn predict_q4k_metal_with_replaced_head_residual_delta(
             let (wq, wk, wv, wo) =
                 resolve_attn_weights(index, layer).expect("attn Q4K slices missing");
             let [(gate_bytes, gate_fmt), (up_bytes, up_fmt), (down_bytes, down_fmt)] = index
-                .interleaved_q4k_layer_data(layer)
+                .interleaved_kquant_layer_data(layer)
                 .expect("ffn Q4K slices missing");
             fn to_fmt(s: &str) -> QuantFormat {
                 match s {
@@ -214,7 +214,7 @@ pub fn predict_q4k_metal_hidden(
             let (wq, wk, wv, wo) =
                 resolve_attn_weights(index, layer).expect("attn Q4K slices missing");
             let [(gate_bytes, gate_fmt), (up_bytes, up_fmt), (down_bytes, down_fmt)] = index
-                .interleaved_q4k_layer_data(layer)
+                .interleaved_kquant_layer_data(layer)
                 .expect("ffn Q4K slices missing");
             fn to_fmt(s: &str) -> QuantFormat {
                 match s {
@@ -310,7 +310,7 @@ pub fn predict_q4k_metal_capture_pre_wo(
             let (wq, wk, wv, wo) =
                 resolve_attn_weights(index, layer).expect("attn Q4K slices missing");
             let [(gate_bytes, gate_fmt), (up_bytes, up_fmt), (down_bytes, down_fmt)] = index
-                .interleaved_q4k_layer_data(layer)
+                .interleaved_kquant_layer_data(layer)
                 .expect("ffn Q4K slices missing");
             fn to_fmt(s: &str) -> QuantFormat {
                 match s {

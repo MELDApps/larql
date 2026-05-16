@@ -2924,11 +2924,11 @@ fn streaming_extract_q4k_from_safetensors() {
     index.load_attn_q4k(&output_dir).unwrap();
     index.load_interleaved_q4k(&output_dir).unwrap();
     assert!(
-        index.has_interleaved_q4k(),
+        index.has_interleaved_kquant(),
         "interleaved Q4K should be loaded"
     );
     // Layer 0 attn slices: [Q/Q4_K, K/Q4_K, V/Q6_K, O/Q4_K]
-    let slices = index.attn_q4k_layer_data(0).expect("layer 0 attn data");
+    let slices = index.attn_kquant_layer_data(0).expect("layer 0 attn data");
     assert_eq!(slices[0].1, "Q4_K", "Q slot format");
     assert_eq!(slices[1].1, "Q4_K", "K slot format");
     assert_eq!(slices[2].1, "Q6_K", "V slot format");

@@ -9,10 +9,10 @@
 
 use ndarray::Array2;
 
+use crate::generation::kv_prefill_run;
 use crate::{EngineInfo, KvEngine};
 use larql_inference::ffn::FfnBackend;
 use larql_inference::forward::hooks::NoopHook;
-use larql_inference::forward::kv_prefill_run;
 use larql_inference::model::ModelWeights;
 use larql_inference::{cpu_engine_backend, EngineBackend};
 
@@ -197,7 +197,8 @@ mod tests {
     // synthetic weights (the test substrate covers the production
     // non-PLE arch; PLE archs are checked at integration time).
 
-    use larql_inference::forward::{generate_with_engine, predict_with_ffn};
+    use crate::generation::generate_with_engine;
+    use larql_inference::forward::predict_with_ffn;
 
     fn run_legacy_no_cache(
         weights: &larql_inference::ModelWeights,

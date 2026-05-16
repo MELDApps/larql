@@ -47,12 +47,12 @@ pub fn predict_honest(
     let used_gpu = if backend.has_q4() {
         let gate_index: &dyn larql_vindex::GateIndex = index;
         // Prefer Q4_K FFN (Ollama-compatible) over Q4_0
-        let (q4_ffn, ffn_is_q4k) = if let Some(mmap) = gate_index.interleaved_q4k_mmap_ref() {
+        let (q4_ffn, ffn_is_q4k) = if let Some(mmap) = gate_index.interleaved_kquant_mmap_ref() {
             (Some(mmap), true)
         } else {
             (gate_index.interleaved_q4_mmap_ref(), false)
         };
-        let has_q4k = index.attn_q4k_layer_data(layer_range.start).is_some();
+        let has_q4k = index.attn_kquant_layer_data(layer_range.start).is_some();
         let has_q8 = index.attn_q8_layer_data(layer_range.start).is_some();
 
         if let Some(q4_ffn_mmap) = q4_ffn {

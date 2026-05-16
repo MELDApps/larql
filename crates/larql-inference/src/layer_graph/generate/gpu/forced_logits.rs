@@ -54,12 +54,12 @@ where
     let norm_offset = weights.arch.norm_weight_offset();
     let hidden = weights.hidden_size;
     let gate_index: &dyn larql_vindex::GateIndex = index;
-    let (q4_ffn, ffn_is_q4k) = if let Some(mmap) = gate_index.interleaved_q4k_mmap_ref() {
+    let (q4_ffn, ffn_is_q4k) = if let Some(mmap) = gate_index.interleaved_kquant_mmap_ref() {
         (Some(mmap), true)
     } else {
         (gate_index.interleaved_q4_mmap_ref(), false)
     };
-    let has_q4k = index.attn_q4k_layer_data(0).is_some();
+    let has_q4k = index.attn_kquant_layer_data(0).is_some();
     let has_q8 = index.attn_q8_layer_data(0).is_some();
     if !backend.has_q4() || q4_ffn.is_none() || (!has_q4k && !has_q8) {
         return Err(

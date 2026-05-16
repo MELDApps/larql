@@ -99,7 +99,7 @@ pub struct ExtractIndexArgs {
     down_q4k: bool,
 
     /// Emit `down_features_q4k.bin` (W2 feature-major down) so per-feature
-    /// row decode can skip the `q4k_ffn_layer` cache. Adds ~14 MB / layer
+    /// row decode can skip the `kquant_ffn_layer` cache. Adds ~14 MB / layer
     /// at Gemma 4B dims; eliminates the ~840 MB heap cache ceiling on
     /// CPU sparse walk and frees the same headroom across all grid shards.
     /// Requires `--quant q4k`.

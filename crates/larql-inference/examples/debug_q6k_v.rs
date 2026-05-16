@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=== Q6_K V projection debug ===\n");
 
-    if let Some([_q, _k, v, _o]) = index.attn_q4k_layer_data(0) {
+    if let Some([_q, _k, v, _o]) = index.attn_kquant_layer_data(0) {
         let v_data = v.0;
         let v_format = v.1;
         println!("V data: {} bytes, format={}", v_data.len(), v_format);

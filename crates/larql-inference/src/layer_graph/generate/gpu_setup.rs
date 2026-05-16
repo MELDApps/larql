@@ -69,7 +69,7 @@ pub(super) fn build_gpu_decode_setup<'a>(
     let hidden = weights.hidden_size;
     let gate_index: &dyn larql_vindex::GateIndex = index;
 
-    let (q4_ffn, ffn_is_q4k) = if let Some(mmap) = gate_index.interleaved_q4k_mmap_ref() {
+    let (q4_ffn, ffn_is_q4k) = if let Some(mmap) = gate_index.interleaved_kquant_mmap_ref() {
         (Some(mmap), true)
     } else {
         (gate_index.interleaved_q4_mmap_ref(), false)
@@ -85,7 +85,7 @@ pub(super) fn build_gpu_decode_setup<'a>(
 
     let first_layer = layer_range.start;
     let intermediate = gate_index.num_features(first_layer);
-    let has_q4k = index.attn_q4k_layer_data(first_layer).is_some();
+    let has_q4k = index.attn_kquant_layer_data(first_layer).is_some();
     let has_q8 = index.attn_q8_layer_data(first_layer).is_some();
     if intermediate == 0 || (!has_q4k && !has_q8) {
         return Err(GenerateError::missing_weights(format!(

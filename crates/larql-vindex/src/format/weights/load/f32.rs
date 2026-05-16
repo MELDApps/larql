@@ -152,7 +152,7 @@ pub fn load_model_weights_with_opts(
     //
     // In Q4 vindexes (quant=q4k) the forward pass reads FFN weights straight
     // from the Q4-packed `interleaved_q4k.bin` mmap via
-    // `VectorIndex::interleaved_q4k_layer_data`, so expanding `gate_vectors.bin`
+    // `VectorIndex::interleaved_kquant_layer_data`, so expanding `gate_vectors.bin`
     // into an f32 HashMap just to have an unused copy wastes ~27 GB of heap at
     // 31B scale and prevents the model from loading on a 96 GB machine.
     // gate_vectors → FFN gate tensors. Skip when the caller doesn't

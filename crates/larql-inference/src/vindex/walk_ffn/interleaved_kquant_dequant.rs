@@ -10,15 +10,15 @@ use ndarray::Array2;
 use super::WalkFfn;
 
 impl<'a> WalkFfn<'a> {
-    pub(super) fn walk_ffn_q4k_dequant(
+    pub(super) fn walk_ffn_kquant_dequant(
         &self,
         layer: usize,
         x: &Array2<f32>,
     ) -> Option<(Array2<f32>, Array2<f32>)> {
-        let ffn = self.index.interleaved_q4k_layer_data(layer)?;
+        let ffn = self.index.interleaved_kquant_layer_data(layer)?;
         // Stream layer N+1 in while we dequant N — same trick the Q4_0
         // path uses. No-op when `layer + 1` is out of range.
-        self.index.prefetch_interleaved_q4k_layer(layer + 1);
+        self.index.prefetch_interleaved_kquant_layer(layer + 1);
         let arch = &*self.weights.arch;
         let intermediate = self.index.num_features(layer);
         if intermediate == 0 {
@@ -52,7 +52,7 @@ impl<'a> WalkFfn<'a> {
             crate::ffn::silu_gate_up(&gate, &up)
         };
         let out = crate::forward::dot_proj(&activation, &w_down);
-        self.trace_path(layer, "interleaved_q4k:dequant");
+        self.trace_path(layer, "interleaved_kquant:dequant");
         Some((out, activation))
     }
 }

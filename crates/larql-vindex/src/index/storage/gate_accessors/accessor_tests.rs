@@ -107,7 +107,7 @@ fn num_features_oob_layer_returns_zero() {
 // a vindex with only Q4K FFN bytes (no `gate_vectors.bin`, no FP4)
 // must surface a non-zero intermediate width via `num_features` so
 // the WalkFfn ladder doesn't drop to the dense f32 fallback and
-// `q4k_matmul_transb` doesn't return zero-row matrices.
+// `kquant_matmul_transb` doesn't return zero-row matrices.
 
 /// Build a synthetic Q4_K interleaved manifest with the given
 /// intermediate width on every layer. Byte payloads are zero — content
@@ -177,14 +177,14 @@ fn q4k_ffn_intermediate_width_returns_some_for_real_manifest() {
     let mut v = VectorIndex::empty(3, 256);
     install_synthetic_q4k(&mut v, 1024);
     for layer in 0..3 {
-        assert_eq!(v.q4k_ffn_intermediate_width(layer), Some(1024));
+        assert_eq!(v.kquant_ffn_intermediate_width(layer), Some(1024));
     }
 }
 
 #[test]
 fn q4k_ffn_intermediate_width_none_when_no_manifest() {
     let v = VectorIndex::empty(2, 256);
-    assert!(v.q4k_ffn_intermediate_width(0).is_none());
+    assert!(v.kquant_ffn_intermediate_width(0).is_none());
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn q4k_ffn_intermediate_width_none_on_unknown_format() {
     ];
     let storage = std::sync::Arc::make_mut(&mut v.storage);
     storage.set_interleaved_q4k(mmap, Some(manifest));
-    assert!(v.q4k_ffn_intermediate_width(0).is_none());
+    assert!(v.kquant_ffn_intermediate_width(0).is_none());
 }
 
 #[test]
@@ -235,7 +235,7 @@ fn q4k_ffn_intermediate_width_none_when_bytes_not_a_whole_row() {
     manifest.push((offset, down_len, "Q4_K".to_string()));
     let storage = std::sync::Arc::make_mut(&mut v.storage);
     storage.set_interleaved_q4k(mmap, Some(manifest));
-    assert!(v.q4k_ffn_intermediate_width(0).is_none());
+    assert!(v.kquant_ffn_intermediate_width(0).is_none());
 }
 
 #[test]

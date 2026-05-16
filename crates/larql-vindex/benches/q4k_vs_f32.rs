@@ -8,7 +8,7 @@
 //!
 //!   f32   — slice `attn_weights.bin` via the weight manifest,
 //!            `decode_floats` (identity for f32) → `Vec<f32>`.
-//!   Q4_K  — `attn_q4k_layer_data(layer)[0]` → raw Q4_K bytes,
+//!   Q4_K  — `attn_kquant_layer_data(layer)[0]` → raw Q4_K bytes,
 //!            `dequantize_q4_k` → `Vec<f32>`.
 //!
 //! Both fixtures extract the same synthetic model to disk once at
@@ -215,7 +215,7 @@ fn bench_q4k_vs_f32(c: &mut Criterion) {
     let f32_attn_mmap = unsafe { memmap2::Mmap::map(&f32_attn_file).unwrap() };
     let (q_offset, q_length, q_elems) = locate_q_entry_f32(&f32_dir);
 
-    // ── Q4_K setup: load via VectorIndex so attn_q4k_layer_data works ──
+    // ── Q4_K setup: load via VectorIndex so attn_kquant_layer_data works ──
     let mut lcb = larql_vindex::SilentLoadCallbacks;
     let mut q4k_index = larql_vindex::VectorIndex::load_vindex(&q4k_dir, &mut lcb).unwrap();
     q4k_index.load_attn_q4k(&q4k_dir).unwrap();
@@ -237,12 +237,12 @@ fn bench_q4k_vs_f32(c: &mut Criterion) {
         });
     });
 
-    // Q4_K path: slice lookup + dequant. `attn_q4k_layer_data[0]` is
+    // Q4_K path: slice lookup + dequant. `attn_kquant_layer_data[0]` is
     // the Q slot, Q4_K format; `dequantize_q4_k` produces a Vec<f32>
     // the same size as the f32 path's output (minus padding overhead).
     group.bench_with_input(BenchmarkId::from_parameter("q4k"), &(), |b, _| {
         b.iter(|| {
-            let slices = q4k_index.attn_q4k_layer_data(0).unwrap();
+            let slices = q4k_index.attn_kquant_layer_data(0).unwrap();
             let (bytes, _format) = slices[0];
             let floats = larql_models::quant::ggml::dequantize_q4_k(bytes, padded).unwrap();
             criterion::black_box(floats);

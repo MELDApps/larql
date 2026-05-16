@@ -412,7 +412,7 @@ mod tests {
     // This is the unification's bit-parity gate (spec §8.4); failure here
     // blocks Step 5 (default flip).
 
-    use larql_inference::forward::{generate_cached_backend, generate_with_engine};
+    use crate::generation::{generate_cached_backend, generate_with_engine};
     use larql_inference::test_utils::make_test_tokenizer;
 
     fn run_legacy(

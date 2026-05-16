@@ -38,13 +38,13 @@ impl Q4kManifestEntry {
         self.shape.get(1).copied()
     }
 
-    /// Format tag as the on-disk string (`"Q4_K"` / `"Q6_K"`).
-    /// `quant::registry::lookup` consumes this directly.
-    pub fn format_tag(&self) -> &'static str {
-        match self.format {
-            QuantBlockFormat::Q4K => "Q4_K",
-            QuantBlockFormat::Q6K => "Q6_K",
-        }
+    /// Format tag as the on-disk string (`"Q4_K"` / `"Q6_K"` / …).
+    /// `quant::registry::lookup` consumes this directly. Lifetime is
+    /// borrowed because the `Other(String)` variant carries a runtime
+    /// tag that future formats use to round-trip through the manifest
+    /// without a typed enum variant.
+    pub fn format_tag(&self) -> &str {
+        self.format.tag()
     }
 }
 

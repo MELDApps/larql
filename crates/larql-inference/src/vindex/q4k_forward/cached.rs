@@ -279,7 +279,7 @@ fn matvec_q4k_or_q6k_q8k(
 /// matvec when this returns true and falls back to the dequant path
 /// otherwise (e.g. Q4_KF layers, padded down projections).
 fn layer_supports_direct_matvec(index: &VectorIndex, layer: usize) -> bool {
-    let attn = match index.attn_q4k_layer_data(layer) {
+    let attn = match index.attn_kquant_layer_data(layer) {
         Some(a) => a,
         None => return false,
     };
@@ -288,7 +288,7 @@ fn layer_supports_direct_matvec(index: &VectorIndex, layer: usize) -> bool {
             return false;
         }
     }
-    let ffn = match index.interleaved_q4k_layer_data(layer) {
+    let ffn = match index.interleaved_kquant_layer_data(layer) {
         Some(f) => f,
         None => return false,
     };
@@ -328,7 +328,7 @@ fn vec_to_2d_row(v: Vec<f32>) -> Array2<f32> {
 /// One-row attention block using direct Q4_K/Q6_K matvec on the
 /// quantised attention slices. Mirrors
 /// [`crate::attention::decode::run_attention_block_decode_step_backend`]
-/// but reads weights from `index.attn_q4k_layer_data(layer)` instead of
+/// but reads weights from `index.attn_kquant_layer_data(layer)` instead of
 /// dequantised f32 in `weights.tensors`.
 #[allow(clippy::too_many_arguments)]
 /// Metal-fused prefill: run the prompt through every layer via the
@@ -360,14 +360,14 @@ pub fn metal_fused_prefill(
     }
 
     let gate_index: &dyn GateIndex = index;
-    let (q4_ffn_mmap, ffn_is_q4k) = if let Some(m) = gate_index.interleaved_q4k_mmap_ref() {
+    let (q4_ffn_mmap, ffn_is_q4k) = if let Some(m) = gate_index.interleaved_kquant_mmap_ref() {
         (m, true)
     } else if let Some(m) = gate_index.interleaved_q4_mmap_ref() {
         (m, false)
     } else {
         return None;
     };
-    index.attn_q4k_layer_data(0)?;
+    index.attn_kquant_layer_data(0)?;
 
     let arch = &*weights.arch;
     let hidden = weights.hidden_size;
@@ -432,7 +432,7 @@ pub fn metal_fused_decode_step(
     use larql_vindex::GateIndex;
 
     let gate_index: &dyn GateIndex = index;
-    let (q4_ffn_mmap, ffn_is_q4k) = if let Some(m) = gate_index.interleaved_q4k_mmap_ref() {
+    let (q4_ffn_mmap, ffn_is_q4k) = if let Some(m) = gate_index.interleaved_kquant_mmap_ref() {
         (m, true)
     } else if let Some(m) = gate_index.interleaved_q4_mmap_ref() {
         (m, false)
@@ -471,7 +471,7 @@ pub fn metal_fused_decode_step(
 /// from the vindex (not f32 dequantised tensors). Same input/output
 /// shape as
 /// [`crate::attention::run_attention_block_decode_step_backend`], but
-/// reads `index.attn_q4k_layer_data(layer)` directly and dispatches
+/// reads `index.attn_kquant_layer_data(layer)` directly and dispatches
 /// the Q/K/V/O projections to the backend's native quantised matvec
 /// (today Q4K / Q4_KF / Q6K via `q4k_matvec_q8_input`). Extending to
 /// new quantised formats is internal to this function — the public
@@ -524,7 +524,7 @@ pub fn attention_decode_step_native(
     );
     let h_norm_row: &[f32] = h_norm.row(0).to_slice().or_else(|| h_norm.as_slice())?;
 
-    let attn = index.attn_q4k_layer_data(layer)?;
+    let attn = index.attn_kquant_layer_data(layer)?;
     let (q_bytes, q_fmt) = attn[0];
     let (k_bytes, k_fmt) = attn[1];
     let (v_bytes, v_fmt) = attn[2];
@@ -721,7 +721,7 @@ fn run_ffn_decode_step_q4k_direct(
     };
     let h_in_row: &[f32] = h_in.row(0).to_slice().or_else(|| h_in.as_slice())?;
 
-    let ffn = index.interleaved_q4k_layer_data(layer)?;
+    let ffn = index.interleaved_kquant_layer_data(layer)?;
     let (gate_bytes, gate_fmt) = ffn[0];
     let (up_bytes, up_fmt) = ffn[1];
     let (down_bytes, down_fmt) = ffn[2];
@@ -1234,7 +1234,7 @@ mod branch_tests {
     }
 
     /// Cover the no-attention-data branch of
-    /// `layer_supports_direct_matvec`: a vindex with no attn_q4k_layer_data.
+    /// `layer_supports_direct_matvec`: a vindex with no attn_kquant_layer_data.
     #[test]
     fn layer_supports_direct_matvec_false_without_attn_data() {
         let weights = make_test_q4k_weights();

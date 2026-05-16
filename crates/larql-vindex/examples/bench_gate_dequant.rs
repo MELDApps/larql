@@ -165,7 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut peak_rss_iter: f64 = rss_start;
         for layer in 0..num_layers {
             let layer_data = idx
-                .interleaved_q4k_layer_data(layer)
+                .interleaved_kquant_layer_data(layer)
                 .ok_or("missing interleaved manifest entry")?;
             let (gate_bytes, gate_format) = layer_data[0];
             if gate_format != "Q4_K" {

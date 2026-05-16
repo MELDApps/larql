@@ -56,7 +56,7 @@ impl<'a> WalkFfn<'a> {
         let down_native = self.index.down_layer_matrix(layer);
         let row_fallback = up_native.is_none() || down_native.is_none();
         if row_fallback
-            && self.index.interleaved_q4k_layer_data(layer).is_none()
+            && self.index.interleaved_kquant_layer_data(layer).is_none()
             && !self.index.has_fp4_storage()
         {
             return None;
@@ -72,7 +72,7 @@ impl<'a> WalkFfn<'a> {
         // Hint the kernel to start streaming layer N+1's Q4_K/Q6_K bytes
         // into the page cache while we work on N. No-op when there's no
         // Q4_K mmap, no manifest, or `layer+1` is out of range.
-        self.index.prefetch_interleaved_q4k_layer(layer + 1);
+        self.index.prefetch_interleaved_kquant_layer(layer + 1);
 
         let mut out = Array2::<f32>::zeros((seq_len, hidden));
         let mut full_activation = Array2::<f32>::zeros((seq_len, intermediate));
@@ -98,7 +98,7 @@ impl<'a> WalkFfn<'a> {
                     Some(larql_compute::dot_proj_gpu(x, &v, self.backend))
                 } else if let Some(y) =
                     self.index
-                        .q4k_matmul_transb(layer, 1, x_flat, seq_len, self.backend)
+                        .kquant_matmul_transb(layer, 1, x_flat, seq_len, self.backend)
                 {
                     ndarray::Array2::from_shape_vec((seq_len, intermediate), y).ok()
                 } else {
@@ -116,7 +116,7 @@ impl<'a> WalkFfn<'a> {
                         Some(larql_compute::matmul_gpu(&activation, &v, self.backend))
                     } else if let Some(act_flat) = act_slice {
                         self.index
-                            .q4k_matmul_transb(layer, 2, act_flat, seq_len, self.backend)
+                            .kquant_matmul_transb(layer, 2, act_flat, seq_len, self.backend)
                             .and_then(|y| {
                                 ndarray::Array2::from_shape_vec((seq_len, hidden), y).ok()
                             })
@@ -162,13 +162,13 @@ impl<'a> WalkFfn<'a> {
             let parallelisable =
                 !layer_has_overrides && is_gated && hits.len() >= 512 && down_native.is_none();
             let down_cache_local: Option<std::sync::Arc<Vec<f32>>> = if parallelisable {
-                self.index.q4k_ffn_layer(layer, 2)
+                self.index.kquant_ffn_layer(layer, 2)
             } else {
                 None
             };
             if let Some(down_arc) = down_cache_local.as_ref().filter(|_| parallelisable) {
                 let down_data: &[f32] = down_arc.as_slice();
-                let up_slices = self.index.interleaved_q4k_layer_data(layer);
+                let up_slices = self.index.interleaved_kquant_layer_data(layer);
                 // Resolve up via the registry — accepts Q4_K, Q6_K, and
                 // any future K-quant rather than hardcoding Q4_K-only.
                 let up_q4k: Option<(&[u8], &larql_vindex::quant::registry::QuantFormatInfo)> =

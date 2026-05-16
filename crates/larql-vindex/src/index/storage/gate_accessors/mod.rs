@@ -59,7 +59,7 @@ impl VectorIndex {
             let d = fp4.manifest.projections.down.precision;
             parts.push(format!("FP4 sparse (gate={g}, up={u}, down={d})"));
         }
-        if self.storage.has_interleaved_q4k() {
+        if self.storage.has_interleaved_kquant() {
             parts.push("Q4K interleaved".into());
         }
         if self.storage.has_interleaved_q4() {
@@ -129,7 +129,7 @@ impl VectorIndex {
         // Q4_K/Q6_K FFN width fallback — derive intermediate dim from
         // the gate component's manifest byte length. Same data the
         // matmul kernel consults, so this can't drift out of sync.
-        if let Some(n) = self.q4k_ffn_intermediate_width(layer) {
+        if let Some(n) = self.kquant_ffn_intermediate_width(layer) {
             return n;
         }
         0
@@ -144,8 +144,8 @@ impl VectorIndex {
     /// (no gate_vectors.bin, no FP4 storage). Reading the same manifest
     /// the matmul kernel reads keeps the width authoritative — there's
     /// no shape duplication that could drift.
-    pub(crate) fn q4k_ffn_intermediate_width(&self, layer: usize) -> Option<usize> {
-        let slices = self.interleaved_q4k_layer_data(layer)?;
+    pub(crate) fn kquant_ffn_intermediate_width(&self, layer: usize) -> Option<usize> {
+        let slices = self.interleaved_kquant_layer_data(layer)?;
         let (gate_bytes, gate_fmt) = slices[0];
         let info = crate::quant::registry::lookup(gate_fmt)?;
         let bytes_per_row = info.bytes_per_row(self.hidden_size)?;

@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::{FfnLayout, VindexConfig, VindexModelConfig};
 use crate::error::VindexError;
@@ -39,15 +39,72 @@ mod ple;
 
 pub mod feature_major_down;
 
-/// Per-block quantisation format for a single tensor in the Q4_K pipeline.
-/// Serde writes / reads the literal strings `"Q4_K"` and `"Q6_K"` to match
-/// llama.cpp / Ollama on-disk conventions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Per-block quantisation format tag carried by Q4_K pipeline manifests.
+///
+/// Serialises / deserialises as the literal on-disk tag string
+/// (`"Q4_K"`, `"Q6_K"`, …) to match llama.cpp / Ollama conventions. The
+/// `Other` variant accepts tags that future binaries can decode but
+/// this one can't — readers see the format string and route through
+/// [`crate::quant::registry`]; if the registry returns `None` the
+/// caller surfaces a clear "unknown format" error rather than the
+/// previous serde panic on an unknown variant.
+///
+/// Adding a new format the registry can decode (e.g., Q5_K) is a
+/// single entry in `QUANT_FORMATS` — no edit to this enum is required.
+/// Add an explicit variant here only when the writer pipeline also
+/// supports emitting the format (the writer dispatches typed because
+/// emitting a new format is a deliberate act that needs an encode
+/// function + user-config option).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuantBlockFormat {
-    #[serde(rename = "Q4_K")]
     Q4K,
-    #[serde(rename = "Q6_K")]
     Q6K,
+    /// Tag the writer pipeline cannot emit but the reader can identify.
+    /// Carries the on-disk string so dispatch can consult the registry.
+    Other(String),
+}
+
+impl QuantBlockFormat {
+    /// On-disk tag string. Routes through [`crate::quant::registry::lookup`].
+    pub fn tag(&self) -> &str {
+        match self {
+            Self::Q4K => "Q4_K",
+            Self::Q6K => "Q6_K",
+            Self::Other(s) => s.as_str(),
+        }
+    }
+
+    /// Construct from a tag string, succeeding only when the format is
+    /// known to [`crate::quant::registry`]. Use at vindex-load seams to
+    /// reject unknown formats once, instead of letting the dispatch
+    /// kernels report `None` per-row.
+    pub fn from_registry_tag(tag: &str) -> Option<Self> {
+        if crate::quant::registry::lookup(tag).is_none() {
+            return None;
+        }
+        Some(match tag {
+            "Q4_K" => Self::Q4K,
+            "Q6_K" => Self::Q6K,
+            other => Self::Other(other.to_string()),
+        })
+    }
+}
+
+impl Serialize for QuantBlockFormat {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.tag())
+    }
+}
+
+impl<'de> Deserialize<'de> for QuantBlockFormat {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(match s.as_str() {
+            "Q4_K" => Self::Q4K,
+            "Q6_K" => Self::Q6K,
+            _ => Self::Other(s),
+        })
+    }
 }
 
 /// Pad a row-major f32 buffer to the next multiple of 256 with zeros
@@ -129,7 +186,7 @@ pub struct Q4kWriteOptions {
     /// When set, the down weights are also stored in feature-major
     /// `[intermediate, hidden]` orientation (Q4_K/Q6_K matching
     /// `down_q4k`), so per-feature decode can skip the
-    /// `q4k_ffn_layer` whole-layer dequant + transpose cache. Adds
+    /// `kquant_ffn_layer` whole-layer dequant + transpose cache. Adds
     /// roughly the same disk footprint as the down portion of
     /// `interleaved_q4k.bin` (~14 MB / layer at Gemma 4B dims).
     /// Recommended for CPU sparse walk and grid/MoE workloads where
@@ -227,6 +284,69 @@ fn update_index_json(
 #[cfg(test)]
 mod helper_tests {
     use super::*;
+
+    // ── QuantBlockFormat: future-format extension ──
+
+    #[test]
+    fn quant_block_format_round_trip_known_variants() {
+        // Existing typed variants serialise to their canonical tags
+        // and round-trip back as the same variant.
+        let q4 = serde_json::to_string(&QuantBlockFormat::Q4K).unwrap();
+        let q6 = serde_json::to_string(&QuantBlockFormat::Q6K).unwrap();
+        assert_eq!(q4, "\"Q4_K\"");
+        assert_eq!(q6, "\"Q6_K\"");
+        let back: QuantBlockFormat = serde_json::from_str("\"Q4_K\"").unwrap();
+        assert_eq!(back, QuantBlockFormat::Q4K);
+        let back: QuantBlockFormat = serde_json::from_str("\"Q6_K\"").unwrap();
+        assert_eq!(back, QuantBlockFormat::Q6K);
+    }
+
+    #[test]
+    fn quant_block_format_unknown_tag_round_trips_as_other() {
+        // A future format the reader binary doesn't recognise must
+        // round-trip through the manifest without panicking. This is
+        // the whole point of the open-enum redesign: a manifest emitted
+        // by a future writer (with Q5_K) is identifiable to a current
+        // binary as "format `Q5_K`, dispatch unknown", not a serde
+        // panic at deserialize time.
+        let parsed: QuantBlockFormat = serde_json::from_str("\"Q5_K\"").unwrap();
+        assert_eq!(parsed, QuantBlockFormat::Other("Q5_K".into()));
+        assert_eq!(parsed.tag(), "Q5_K");
+        let re_serialized = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(re_serialized, "\"Q5_K\"");
+    }
+
+    #[test]
+    fn quant_block_format_from_registry_tag_validates() {
+        // `from_registry_tag` is the construction seam — only tags the
+        // registry recognises become a `QuantBlockFormat`. This is the
+        // load-time gate that prevents a corrupt manifest from
+        // surfacing as silent zero-row matmul results.
+        assert_eq!(
+            QuantBlockFormat::from_registry_tag("Q4_K"),
+            Some(QuantBlockFormat::Q4K)
+        );
+        assert_eq!(
+            QuantBlockFormat::from_registry_tag("Q6_K"),
+            Some(QuantBlockFormat::Q6K)
+        );
+        // Q5_K isn't in the registry yet — gated.
+        assert!(QuantBlockFormat::from_registry_tag("Q5_K").is_none());
+        // Typos and lowercase are gated too — manifests on disk always
+        // use the canonical upper-case form.
+        assert!(QuantBlockFormat::from_registry_tag("q4_k").is_none());
+        assert!(QuantBlockFormat::from_registry_tag("").is_none());
+    }
+
+    #[test]
+    fn quant_block_format_tag_borrows_from_other_variant() {
+        // The `Other` variant's tag must round-trip the runtime string
+        // exactly — no canonicalisation, no case-folding. Stale or
+        // future manifest entries are echoed back unchanged so callers
+        // can produce a clear "unknown format `X`" diagnostic.
+        let f = QuantBlockFormat::Other("Q5_K_M".into());
+        assert_eq!(f.tag(), "Q5_K_M");
+    }
 
     // ── resolve_v_tensor ──
 

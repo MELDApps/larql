@@ -339,6 +339,74 @@ fn bench_register_cascade(c: &mut Criterion) {
     group.finish();
 }
 
+// ── ADR-0020: saturation filter overhead ─────────────────────────────────────
+
+/// Builds a production-shape topology and pre-loads every replica's
+/// `requests_in_flight` to a known level. Used to measure the cost of
+/// the ADR-0020 saturation filter in `route()` against the no-filter
+/// baseline.
+fn build_loaded_state(
+    n_shards: usize,
+    n_replicas: usize,
+    n_layers: usize,
+    in_flight_per_replica: u32,
+) -> GridState {
+    let mut state = build_realistic_state(n_layers, n_shards, n_replicas);
+    let server_ids: Vec<String> = state.servers().map(|(id, _)| id.clone()).collect();
+    for id in server_ids {
+        state.update_heartbeat(&id, 50.0, 1 << 30, in_flight_per_replica, Vec::new(), 0.0);
+    }
+    state
+}
+
+/// ADR-0020 — three scenarios across the same topology:
+///   * ceiling=None: filter disabled (baseline)
+///   * ceiling=Some(N), all replicas under N: filter walks but never trims
+///   * ceiling=Some(N), all replicas at N: filter trims every candidate
+///     → `route()` short-circuits to `None` (503 in production)
+fn bench_route_saturation_filter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("routing/saturation_filter");
+    let scenarios: &[(usize, usize, &str)] = &[
+        (5, 2, "5shards_x2"),
+        (10, 2, "10shards_x2"),
+        (20, 2, "20shards_x2"),
+    ];
+    for &(n_shards, n_replicas, label) in scenarios {
+        // Each replica at in_flight = 4. With ceiling=16 they're all
+        // well below; with ceiling=4 they're all at the ceiling.
+        let mut state = build_loaded_state(n_shards, n_replicas, 30, 4);
+
+        // Baseline: filter disabled.
+        state.set_saturation_ceiling(None);
+        group.bench_with_input(
+            BenchmarkId::new(format!("{label}_no_filter"), n_shards * n_replicas),
+            &(),
+            |b, _| b.iter(|| state.route(Some("bench-model"), 15)),
+        );
+
+        // Filter enabled but no replica saturated — measures pure
+        // filter overhead on the success path.
+        state.set_saturation_ceiling(Some(16));
+        group.bench_with_input(
+            BenchmarkId::new(format!("{label}_filter_all_unsat"), n_shards * n_replicas),
+            &(),
+            |b, _| b.iter(|| state.route(Some("bench-model"), 15)),
+        );
+
+        // Every replica at ceiling — `route()` returns `None`. Confirms
+        // the saturation short-circuit doesn't degrade vs the success
+        // path, and gives operators a number to put next to the 503
+        // counter.
+        state.set_saturation_ceiling(Some(4));
+        group.bench_with_input(
+            BenchmarkId::new(format!("{label}_filter_all_sat"), n_shards * n_replicas),
+            &(),
+            |b, _| b.iter(|| state.route(Some("bench-model"), 15)),
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_route_single_layer,
@@ -350,5 +418,6 @@ criterion_group!(
     bench_heartbeat_update,
     bench_single_register,
     bench_register_cascade,
+    bench_route_saturation_filter,
 );
 criterion_main!(benches);

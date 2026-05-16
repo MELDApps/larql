@@ -486,7 +486,7 @@ pub fn make_starcoder2_test_weights() -> ModelWeights {
 // `make_test_weights` uses hidden=16, below Q4_K's 256-element
 // super-block minimum. The cached / direct-matvec decode paths in
 // `vindex/q4k_forward/cached.rs` require a vindex with real
-// `attn_q4k_layer_data` + `interleaved_q4k_layer_data` manifests,
+// `attn_kquant_layer_data` + `interleaved_kquant_layer_data` manifests,
 // so unit tests for those paths can't fit the tiny fixture. The
 // helpers below build a hidden=256, intermediate=256 Gemma 3-style
 // fixture with synthetic Q4_K bytes that round-trip through

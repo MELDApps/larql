@@ -256,16 +256,16 @@ impl MmapStorage {
 
     // ── Boolean capability checks (consumed by `is_some()` migrations) ─
 
-    pub fn has_interleaved_q4k(&self) -> bool {
+    pub fn has_interleaved_kquant(&self) -> bool {
         self.interleaved_q4k.is_some()
     }
     pub fn has_interleaved_q4(&self) -> bool {
         self.interleaved_q4.is_some()
     }
-    pub fn has_down_features_q4k(&self) -> bool {
+    pub fn has_down_features_kquant(&self) -> bool {
         self.down_features_q4k.is_some()
     }
-    pub fn has_attn_q4k(&self) -> bool {
+    pub fn has_attn_kquant(&self) -> bool {
         self.attn_q4k.is_some()
     }
     pub fn has_attn_q4(&self) -> bool {
@@ -304,7 +304,7 @@ impl MmapStorage {
     /// Borrow the FFN Q4_K interleaved buffer without paying a
     /// refcount bump. Use when the consumer needs the bytes for the
     /// duration of `&self` only (e.g., madvise, kernel dispatch).
-    pub fn interleaved_q4k_whole_buffer_view(&self) -> Option<&Bytes> {
+    pub fn interleaved_kquant_whole_buffer_view(&self) -> Option<&Bytes> {
         self.interleaved_q4k.as_ref()
     }
     pub fn interleaved_q4_whole_buffer_view(&self) -> Option<&Bytes> {
@@ -424,7 +424,7 @@ fn checked_view<'a>(bytes: &'a Bytes, offset: usize, length: usize) -> Option<By
 impl VindexStorage for MmapStorage {
     // ── FFN ───────────────────────────────────────────────────────
 
-    fn interleaved_q4k_layer_data(
+    fn interleaved_kquant_layer_data(
         &self,
         layer: usize,
     ) -> Option<[(BytesView<'_>, &str); FFN_COMPONENTS_PER_LAYER]> {
@@ -446,7 +446,7 @@ impl VindexStorage for MmapStorage {
         Some(out)
     }
 
-    fn interleaved_q4k_whole_buffer(&self) -> Option<Bytes> {
+    fn interleaved_kquant_whole_buffer(&self) -> Option<Bytes> {
         self.interleaved_q4k.clone()
     }
 
@@ -473,7 +473,7 @@ impl VindexStorage for MmapStorage {
 
     // ── Attention ─────────────────────────────────────────────────
 
-    fn attn_q4k_layer_data(
+    fn attn_kquant_layer_data(
         &self,
         layer: usize,
     ) -> Option<[(BytesView<'_>, &str); ATTN_TENSORS_PER_LAYER]> {
@@ -586,12 +586,12 @@ mod tests {
     #[test]
     fn empty_storage_returns_none_everywhere() {
         let s = MmapStorage::empty(2560);
-        assert!(s.interleaved_q4k_layer_data(0).is_none());
-        assert!(s.interleaved_q4k_whole_buffer().is_none());
+        assert!(s.interleaved_kquant_layer_data(0).is_none());
+        assert!(s.interleaved_kquant_whole_buffer().is_none());
         assert!(s.interleaved_q4_whole_buffer().is_none());
         assert!(s.down_features_q4k_layer_data(0).is_none());
         assert!(s.gate_q4_layer_data(0).is_none());
-        assert!(s.attn_q4k_layer_data(0).is_none());
+        assert!(s.attn_kquant_layer_data(0).is_none());
         assert!(s.attn_q4_whole_buffer().is_none());
         assert!(s.attn_q4_layer_slices(0).is_none());
         assert!(s.attn_q8_layer_data(0).is_none());
@@ -617,7 +617,7 @@ mod tests {
         );
 
         for layer in 0..3 {
-            let arr = s.interleaved_q4k_layer_data(layer).expect("layer present");
+            let arr = s.interleaved_kquant_layer_data(layer).expect("layer present");
             for (c, (view, fmt)) in arr.iter().enumerate() {
                 let global = layer * FFN_COMPONENTS_PER_LAYER + c;
                 let expected: &[u8] = &payload[global * 16..(global + 1) * 16];
@@ -640,7 +640,7 @@ mod tests {
             (8, 8, "Q4_K".to_string()),
             (16, 32, "Q4_K".to_string()), // 16 + 32 = 48 > 32
         ]);
-        assert!(s.interleaved_q4k_layer_data(0).is_none());
+        assert!(s.interleaved_kquant_layer_data(0).is_none());
     }
 
     /// Attention Q8 layer data carries vals + scales spans; both must
@@ -738,14 +738,14 @@ mod tests {
                 (32, 16, "Q4_K".to_string()),
             ]),
         );
-        assert!(s.has_interleaved_q4k());
-        assert!(s.interleaved_q4k_whole_buffer().is_some());
-        assert!(s.interleaved_q4k_whole_buffer_view().is_some());
-        let arr = s.interleaved_q4k_layer_data(0).expect("layer 0");
+        assert!(s.has_interleaved_kquant());
+        assert!(s.interleaved_kquant_whole_buffer().is_some());
+        assert!(s.interleaved_kquant_whole_buffer_view().is_some());
+        let arr = s.interleaved_kquant_layer_data(0).expect("layer 0");
         assert_eq!(arr[0].0.len(), 16);
         assert_eq!(arr[0].1, "Q4_K");
         // Layer 1 is past the 3 manifest entries → None.
-        assert!(s.interleaved_q4k_layer_data(1).is_none());
+        assert!(s.interleaved_kquant_layer_data(1).is_none());
     }
 
     #[test]
@@ -773,7 +773,7 @@ mod tests {
                 padded_width: 8,
             }],
         );
-        assert!(s.has_down_features_q4k());
+        assert!(s.has_down_features_kquant());
         let (view, fmt, padded) = s.down_features_q4k_layer_data(0).expect("layer 0");
         assert_eq!(view.len(), 32);
         assert_eq!(fmt, "Q4_K");
@@ -794,8 +794,8 @@ mod tests {
                 (48, 16, "Q4_K".to_string()),
             ]),
         );
-        assert!(s.has_attn_q4k());
-        let q4k_arr = s.attn_q4k_layer_data(0).expect("attn q4k");
+        assert!(s.has_attn_kquant());
+        let q4k_arr = s.attn_kquant_layer_data(0).expect("attn q4k");
         assert_eq!(q4k_arr[0].0.len(), 16);
 
         s.set_attn_q4(
@@ -954,7 +954,7 @@ mod tests {
         );
 
         // Trait surface — owned-Bytes whole-buffer methods.
-        assert!(s.interleaved_q4k_whole_buffer().is_some());
+        assert!(s.interleaved_kquant_whole_buffer().is_some());
         assert!(s.interleaved_q4_whole_buffer().is_some());
         assert!(s.attn_q4_whole_buffer().is_some());
         assert!(s.lm_head_q4_bytes().is_some());
@@ -963,12 +963,12 @@ mod tests {
 
         // has_* helpers — both the populated and unpopulated
         // branches via a fresh empty.
-        assert!(s.has_interleaved_q4k());
+        assert!(s.has_interleaved_kquant());
         assert!(s.has_interleaved_q4());
-        assert!(s.has_down_features_q4k());
+        assert!(s.has_down_features_kquant());
         assert!(s.has_gate_q4());
         assert!(s.has_gate_vectors());
-        assert!(s.has_attn_q4k());
+        assert!(s.has_attn_kquant());
         assert!(s.has_attn_q4());
         assert!(s.has_attn_q8());
         assert!(s.has_lm_head_q4());
@@ -976,12 +976,12 @@ mod tests {
         assert!(s.has_lm_head_f32());
 
         let empty = MmapStorage::empty(8);
-        assert!(!empty.has_interleaved_q4k());
+        assert!(!empty.has_interleaved_kquant());
         assert!(!empty.has_interleaved_q4());
-        assert!(!empty.has_down_features_q4k());
+        assert!(!empty.has_down_features_kquant());
         assert!(!empty.has_gate_q4());
         assert!(!empty.has_gate_vectors());
-        assert!(!empty.has_attn_q4k());
+        assert!(!empty.has_attn_kquant());
         assert!(!empty.has_attn_q4());
         assert!(!empty.has_attn_q8());
         assert!(!empty.has_lm_head_q4());
@@ -991,7 +991,7 @@ mod tests {
         // Trait dispatch via `Arc<dyn VindexStorage>`.
         let dyn_storage: Arc<dyn VindexStorage> = Arc::new(s);
         assert!(dyn_storage.gate_q4_layer_data(0).is_some());
-        assert!(dyn_storage.attn_q4k_layer_data(0).is_some());
+        assert!(dyn_storage.attn_kquant_layer_data(0).is_some());
         assert!(dyn_storage.attn_q4_layer_slices(0).is_some());
         assert!(dyn_storage.attn_q8_layer_data(0).is_some());
         assert!(dyn_storage.gate_layer_view(0).is_some());
@@ -999,7 +999,7 @@ mod tests {
     }
 
     /// `attn_q4_layer_slices` rejects an out-of-bounds manifest slice
-    /// for the same reason `attn_q4k_layer_data` does — exercising the
+    /// for the same reason `attn_kquant_layer_data` does — exercising the
     /// per-tensor checked_view branch.
     #[test]
     fn attn_q4_layer_slices_rejects_out_of_bounds() {
@@ -1069,7 +1069,7 @@ mod tests {
 
         let mut s = MmapStorage::empty(8);
         s.set_interleaved_q4k(mmap_arc, None);
-        let view = s.interleaved_q4k_whole_buffer_view().expect("buf");
+        let view = s.interleaved_kquant_whole_buffer_view().expect("buf");
         assert_eq!(view.as_ref().as_ptr(), mmap_ref_ptr);
     }
 
@@ -1138,8 +1138,8 @@ mod tests {
 
         // No panic; data still readable after.
         s.release_pages();
-        assert!(s.has_interleaved_q4k());
-        assert!(s.has_attn_q4k());
+        assert!(s.has_interleaved_kquant());
+        assert!(s.has_attn_kquant());
         assert!(s.has_lm_head_f32());
         assert!(s.has_gate_vectors());
         assert!(s.has_gate_q4());

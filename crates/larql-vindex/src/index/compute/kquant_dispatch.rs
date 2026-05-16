@@ -3,7 +3,7 @@
 //!
 //! Storage-side accessors (the mmap loaders, manifest parsing, cache
 //! management) live in `crate::index::storage::ffn_store`. This module
-//! reads `interleaved_q4k_layer_data` slices and routes them through
+//! reads `interleaved_kquant_layer_data` slices and routes them through
 //! the registry (`crate::quant::registry`) — there are no inline
 //! 144 / 210 byte-stride literals here.
 
@@ -25,7 +25,7 @@ impl VectorIndex {
     /// compute backend is provided (Metal on Apple Silicon, CPU-SIMD
     /// otherwise) — one submission per X row. Falls back to the rayon
     /// + CPU-NEON scalar path when no backend is attached.
-    pub fn q4k_matmul_transb(
+    pub fn kquant_matmul_transb(
         &self,
         layer: usize,
         component: usize,
@@ -36,7 +36,7 @@ impl VectorIndex {
         if component > 2 {
             return None;
         }
-        let slices = self.interleaved_q4k_layer_data(layer)?;
+        let slices = self.interleaved_kquant_layer_data(layer)?;
         let (bytes, format) = slices[component];
 
         let intermediate = self.num_features(layer);
@@ -90,11 +90,11 @@ impl VectorIndex {
 
     /// Fused Q4K/Q6K decode + dot with `x` for one feature. Returns `None`
     /// if the row isn't available. This is ~2× faster than the
-    /// `q4k_ffn_row_into` → BLAS sdot sequence because it skips the Vec
+    /// `kquant_ffn_row_into` → BLAS sdot sequence because it skips the Vec
     /// allocation, the intermediate copy, and keeps the decoded data in
     /// registers.
     #[inline]
-    pub fn q4k_ffn_row_dot(
+    pub fn kquant_ffn_row_dot(
         &self,
         layer: usize,
         component: usize,
@@ -104,7 +104,7 @@ impl VectorIndex {
         if component > 2 || x.len() != self.hidden_size {
             return None;
         }
-        let slices = self.interleaved_q4k_layer_data(layer)?;
+        let slices = self.interleaved_kquant_layer_data(layer)?;
         let (bytes, format) = slices[component];
         let hidden = self.hidden_size;
         if feat >= self.num_features(layer) {
@@ -129,10 +129,10 @@ impl VectorIndex {
     /// wide — not a single feature's down vector. Calling with
     /// `component == 2` here would silently produce wrong values
     /// (correct stride, wrong meaning). Callers wanting one feature's
-    /// down vector must go through `q4k_ffn_row_scaled_add_via_cache`,
+    /// down vector must go through `kquant_ffn_row_scaled_add_via_cache`,
     /// which transposes the layer first. See ROADMAP W2.
     #[inline]
-    pub fn q4k_ffn_row_scaled_add(
+    pub fn kquant_ffn_row_scaled_add(
         &self,
         layer: usize,
         component: usize,
@@ -143,7 +143,7 @@ impl VectorIndex {
         if component >= 2 || out.len() != self.hidden_size {
             return false;
         }
-        let Some(slices) = self.interleaved_q4k_layer_data(layer) else {
+        let Some(slices) = self.interleaved_kquant_layer_data(layer) else {
             return false;
         };
         let (bytes, format) = slices[component];
@@ -174,14 +174,14 @@ impl VectorIndex {
     /// When the vindex was extracted with `feature_major_down=true`,
     /// down lives in feature-major orientation on disk and a single
     /// row is one feature's down vector (`hidden`-dim wide). This
-    /// skips the `q4k_ffn_layer` cache entirely — no whole-layer
+    /// skips the `kquant_ffn_layer` cache entirely — no whole-layer
     /// dequant, no transpose, no Mutex contention, no ~840 MB RSS
     /// ceiling on Gemma 4B.
     ///
     /// Returns `false` when `down_features_q4k.bin` isn't loaded —
-    /// caller falls back to `q4k_ffn_row_scaled_add_via_cache`.
+    /// caller falls back to `kquant_ffn_row_scaled_add_via_cache`.
     #[inline]
-    pub fn q4k_down_feature_scaled_add(
+    pub fn kquant_down_feature_scaled_add(
         &self,
         layer: usize,
         feat: usize,
@@ -240,7 +240,7 @@ impl VectorIndex {
     /// budget. Cost is ~50–70μs per row for hidden≈5376; at K=100 on a
     /// 60-layer model that's ~60 × 100 × 2 decodes × 60μs ≈ 720ms per
     /// forward pass.
-    pub fn q4k_ffn_row_into(
+    pub fn kquant_ffn_row_into(
         &self,
         layer: usize,
         component: usize,
@@ -250,7 +250,7 @@ impl VectorIndex {
         if component > 2 || out.len() != self.hidden_size {
             return false;
         }
-        let Some(slices) = self.interleaved_q4k_layer_data(layer) else {
+        let Some(slices) = self.interleaved_kquant_layer_data(layer) else {
             return false;
         };
         let (bytes, format) = slices[component];
@@ -284,21 +284,21 @@ impl VectorIndex {
 mod tests {
     use crate::index::core::VectorIndex;
 
-    /// Locks in the W2 footgun fix: `q4k_ffn_row_scaled_add` rejects
+    /// Locks in the W2 footgun fix: `kquant_ffn_row_scaled_add` rejects
     /// `component == 2` (down) up-front. Down on disk is
     /// `[hidden, intermediate]` so `feat`-th row is hidden-dim wide,
     /// not a single feature's down vector — calling this function
     /// with `component == 2` would have silently produced wrong
     /// values. The dispatch in `ffn_row_scaled_add` routes
-    /// `component == 2` to either `q4k_down_feature_scaled_add` (W2)
-    /// or `q4k_ffn_row_scaled_add_via_cache` (legacy); this raw entry
+    /// `component == 2` to either `kquant_down_feature_scaled_add` (W2)
+    /// or `kquant_ffn_row_scaled_add_via_cache` (legacy); this raw entry
     /// point must refuse the coordinate explicitly.
     #[test]
     fn q4k_ffn_row_scaled_add_rejects_component_2() {
         let index = VectorIndex::empty(1, 256);
         let mut out = vec![0.0f32; 256];
         for component in [2usize, 3, 4, 99] {
-            let ok = index.q4k_ffn_row_scaled_add(0, component, 0, 1.0, &mut out);
+            let ok = index.kquant_ffn_row_scaled_add(0, component, 0, 1.0, &mut out);
             assert!(!ok, "component {component} must be rejected");
         }
     }
@@ -309,48 +309,48 @@ mod tests {
     fn q4k_ffn_row_scaled_add_rejects_wrong_out_len() {
         let index = VectorIndex::empty(1, 256);
         let mut bad = vec![0.0f32; 128]; // half-width
-        let ok = index.q4k_ffn_row_scaled_add(0, 0, 0, 1.0, &mut bad);
+        let ok = index.kquant_ffn_row_scaled_add(0, 0, 0, 1.0, &mut bad);
         assert!(!ok, "out.len() != hidden_size must be rejected");
     }
 
-    /// `q4k_down_feature_scaled_add` returns `false` when no feature-major
+    /// `kquant_down_feature_scaled_add` returns `false` when no feature-major
     /// down file is loaded — caller's responsibility to fall back to the
     /// cache path. The dispatch in `ffn_row_scaled_add` does exactly that.
     #[test]
     fn q4k_down_feature_scaled_add_returns_false_when_unloaded() {
         let index = VectorIndex::empty(1, 256);
         let mut out = vec![0.0f32; 256];
-        assert!(!index.q4k_down_feature_scaled_add(0, 0, 1.0, &mut out));
+        assert!(!index.kquant_down_feature_scaled_add(0, 0, 1.0, &mut out));
     }
 
-    // ── q4k_matmul_transb early returns ────────────────────────────
+    // ── kquant_matmul_transb early returns ────────────────────────────
 
     #[test]
     fn q4k_matmul_transb_rejects_invalid_component() {
         let index = VectorIndex::empty(1, 256);
         let x = vec![0.0_f32; 256];
         for component in [3usize, 4, 99] {
-            assert!(index.q4k_matmul_transb(0, component, &x, 1, None).is_none());
+            assert!(index.kquant_matmul_transb(0, component, &x, 1, None).is_none());
         }
     }
 
     #[test]
     fn q4k_matmul_transb_returns_none_when_no_q4k_data() {
-        // No interleaved_q4k mmap → interleaved_q4k_layer_data returns
+        // No interleaved_q4k mmap → interleaved_kquant_layer_data returns
         // None → matmul bails out.
         let index = VectorIndex::empty(1, 256);
         let x = vec![0.0_f32; 256];
-        assert!(index.q4k_matmul_transb(0, 0, &x, 1, None).is_none());
+        assert!(index.kquant_matmul_transb(0, 0, &x, 1, None).is_none());
     }
 
-    // ── q4k_ffn_row_dot early returns ──────────────────────────────
+    // ── kquant_ffn_row_dot early returns ──────────────────────────────
 
     #[test]
     fn q4k_ffn_row_dot_rejects_invalid_component() {
         let index = VectorIndex::empty(1, 256);
         let x = vec![0.0_f32; 256];
         for component in [3usize, 99] {
-            assert!(index.q4k_ffn_row_dot(0, component, 0, &x).is_none());
+            assert!(index.kquant_ffn_row_dot(0, component, 0, &x).is_none());
         }
     }
 
@@ -358,17 +358,17 @@ mod tests {
     fn q4k_ffn_row_dot_rejects_wrong_x_len() {
         let index = VectorIndex::empty(1, 256);
         let bad = vec![0.0_f32; 128]; // hidden_size is 256
-        assert!(index.q4k_ffn_row_dot(0, 0, 0, &bad).is_none());
+        assert!(index.kquant_ffn_row_dot(0, 0, 0, &bad).is_none());
     }
 
     #[test]
     fn q4k_ffn_row_dot_returns_none_when_no_q4k_data() {
         let index = VectorIndex::empty(1, 256);
         let x = vec![0.0_f32; 256];
-        assert!(index.q4k_ffn_row_dot(0, 0, 0, &x).is_none());
+        assert!(index.kquant_ffn_row_dot(0, 0, 0, &x).is_none());
     }
 
-    // ── q4k_ffn_row_scaled_add: existing tests covered c=2 and out.len()
+    // ── kquant_ffn_row_scaled_add: existing tests covered c=2 and out.len()
     //
     // Add: no q4k data → false.
 
@@ -376,28 +376,28 @@ mod tests {
     fn q4k_ffn_row_scaled_add_returns_false_when_no_q4k_data() {
         let index = VectorIndex::empty(1, 256);
         let mut out = vec![0.0_f32; 256];
-        // component=0, valid out.len() — fails on the `interleaved_q4k_layer_data
+        // component=0, valid out.len() — fails on the `interleaved_kquant_layer_data
         // → None` guard, not on the out.len()/component checks.
-        assert!(!index.q4k_ffn_row_scaled_add(0, 0, 0, 1.0, &mut out));
+        assert!(!index.kquant_ffn_row_scaled_add(0, 0, 0, 1.0, &mut out));
     }
 
-    // ── q4k_down_feature_scaled_add early returns ──────────────────
+    // ── kquant_down_feature_scaled_add early returns ──────────────────
 
     #[test]
     fn q4k_down_feature_scaled_add_rejects_wrong_out_len() {
         let index = VectorIndex::empty(1, 256);
         let mut bad = vec![0.0_f32; 128];
-        assert!(!index.q4k_down_feature_scaled_add(0, 0, 1.0, &mut bad));
+        assert!(!index.kquant_down_feature_scaled_add(0, 0, 1.0, &mut bad));
     }
 
-    // ── q4k_ffn_row_into early returns ─────────────────────────────
+    // ── kquant_ffn_row_into early returns ─────────────────────────────
 
     #[test]
     fn q4k_ffn_row_into_rejects_invalid_component() {
         let index = VectorIndex::empty(1, 256);
         let mut out = vec![0.0_f32; 256];
         for component in [3usize, 99] {
-            assert!(!index.q4k_ffn_row_into(0, component, 0, &mut out));
+            assert!(!index.kquant_ffn_row_into(0, component, 0, &mut out));
         }
     }
 
@@ -405,13 +405,13 @@ mod tests {
     fn q4k_ffn_row_into_rejects_wrong_out_len() {
         let index = VectorIndex::empty(1, 256);
         let mut bad = vec![0.0_f32; 128];
-        assert!(!index.q4k_ffn_row_into(0, 0, 0, &mut bad));
+        assert!(!index.kquant_ffn_row_into(0, 0, 0, &mut bad));
     }
 
     #[test]
     fn q4k_ffn_row_into_returns_false_when_no_q4k_data() {
         let index = VectorIndex::empty(1, 256);
         let mut out = vec![0.0_f32; 256];
-        assert!(!index.q4k_ffn_row_into(0, 0, 0, &mut out));
+        assert!(!index.kquant_ffn_row_into(0, 0, 0, &mut out));
     }
 }

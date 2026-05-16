@@ -1,7 +1,7 @@
 //! FFN storage — mmap loaders, accessors, prefetchers, and the
 //! Q4_K/Q6_K dequant cache. Compute-side codec dispatch (matmul +
 //! row-level fused decode) lives in
-//! `crate::index::compute::q4k_dispatch`.
+//! `crate::index::compute::kquant_dispatch`.
 //!
 //! Files managed (split-by-variant, M7 cleanup 2026-05-01):
 //! - `down.rs`             — `down_features.bin` (feature-major f32)
@@ -23,7 +23,7 @@
 //! The cache (`q4k_ffn_cache`) is bounded by
 //! `set_q4k_ffn_cache_max_layers`; only the CPU per-position fallback
 //! populates it (Metal full-K decode streams Q4_K bytes through
-//! `compute::q4k_dispatch::q4k_matmul_transb`).
+//! `compute::kquant_dispatch::kquant_matmul_transb`).
 
 use std::sync::{Arc, Mutex};
 
@@ -51,8 +51,8 @@ mod fp4;
 mod gate_q4;
 mod interleaved;
 mod interleaved_q4;
-mod interleaved_q4k;
-mod q4k_cache;
+mod interleaved_kquant;
+mod kquant_cache;
 mod up;
 
 // ── FfnStore composed-substore ─────────────────────────────────────────

@@ -1,8 +1,8 @@
 // Quick latency benchmark: forward_to_layer vs generate_cached timing.
 // Opt in with:
-//   LARQL_MODEL=<path-or-hf-id> cargo test --test bench_probe_latency --release -- --nocapture
-use larql_inference::forward::generate_cached_constrained;
+//   LARQL_MODEL=<path-or-hf-id> cargo test -p larql-kv --test bench_probe_latency --release -- --nocapture
 use larql_inference::{encode_prompt, forward::forward_to_layer, InferenceModel, WeightFfn};
+use larql_kv::generation::generate_cached_constrained;
 use std::time::Instant;
 
 #[test]

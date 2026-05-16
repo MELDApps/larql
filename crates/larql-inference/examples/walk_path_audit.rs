@@ -371,31 +371,31 @@ impl<'a> QuantizedFfnAccess for MaskedGateIndex<'a> {
     fn interleaved_q4_mmap_ref(&self) -> Option<&[u8]> {
         self.inner.interleaved_q4_mmap_ref()
     }
-    fn has_interleaved_q4k(&self) -> bool {
-        !self.mask.hide_q4k && self.inner.has_interleaved_q4k()
+    fn has_interleaved_kquant(&self) -> bool {
+        !self.mask.hide_q4k && self.inner.has_interleaved_kquant()
     }
-    fn interleaved_q4k_mmap_ref(&self) -> Option<&[u8]> {
-        self.inner.interleaved_q4k_mmap_ref()
+    fn interleaved_kquant_mmap_ref(&self) -> Option<&[u8]> {
+        self.inner.interleaved_kquant_mmap_ref()
     }
-    fn prefetch_interleaved_q4k_layer(&self, l: usize) {
-        self.inner.prefetch_interleaved_q4k_layer(l)
+    fn prefetch_interleaved_kquant_layer(&self, l: usize) {
+        self.inner.prefetch_interleaved_kquant_layer(l)
     }
-    fn interleaved_q4k_layer_data(&self, l: usize) -> Option<[(&[u8], &str); 3]> {
-        self.inner.interleaved_q4k_layer_data(l)
+    fn interleaved_kquant_layer_data(&self, l: usize) -> Option<[(&[u8], &str); 3]> {
+        self.inner.interleaved_kquant_layer_data(l)
     }
-    fn has_down_features_q4k(&self) -> bool {
-        self.inner.has_down_features_q4k()
+    fn has_down_features_kquant(&self) -> bool {
+        self.inner.has_down_features_kquant()
     }
-    fn q4k_ffn_layer(&self, l: usize, c: usize) -> Option<std::sync::Arc<Vec<f32>>> {
-        self.inner.q4k_ffn_layer(l, c)
+    fn kquant_ffn_layer(&self, l: usize, c: usize) -> Option<std::sync::Arc<Vec<f32>>> {
+        self.inner.kquant_ffn_layer(l, c)
     }
-    fn q4k_ffn_row_into(&self, l: usize, c: usize, f: usize, out: &mut [f32]) -> bool {
-        self.inner.q4k_ffn_row_into(l, c, f, out)
+    fn kquant_ffn_row_into(&self, l: usize, c: usize, f: usize, out: &mut [f32]) -> bool {
+        self.inner.kquant_ffn_row_into(l, c, f, out)
     }
-    fn q4k_ffn_row_dot(&self, l: usize, c: usize, f: usize, x: &[f32]) -> Option<f32> {
-        self.inner.q4k_ffn_row_dot(l, c, f, x)
+    fn kquant_ffn_row_dot(&self, l: usize, c: usize, f: usize, x: &[f32]) -> Option<f32> {
+        self.inner.kquant_ffn_row_dot(l, c, f, x)
     }
-    fn q4k_ffn_row_scaled_add_via_cache(
+    fn kquant_ffn_row_scaled_add_via_cache(
         &self,
         l: usize,
         c: usize,
@@ -403,9 +403,9 @@ impl<'a> QuantizedFfnAccess for MaskedGateIndex<'a> {
         a: f32,
         out: &mut [f32],
     ) -> bool {
-        self.inner.q4k_ffn_row_scaled_add_via_cache(l, c, f, a, out)
+        self.inner.kquant_ffn_row_scaled_add_via_cache(l, c, f, a, out)
     }
-    fn q4k_ffn_row_scaled_add(
+    fn kquant_ffn_row_scaled_add(
         &self,
         l: usize,
         c: usize,
@@ -413,12 +413,12 @@ impl<'a> QuantizedFfnAccess for MaskedGateIndex<'a> {
         a: f32,
         out: &mut [f32],
     ) -> bool {
-        self.inner.q4k_ffn_row_scaled_add(l, c, f, a, out)
+        self.inner.kquant_ffn_row_scaled_add(l, c, f, a, out)
     }
-    fn q4k_down_feature_scaled_add(&self, l: usize, f: usize, a: f32, out: &mut [f32]) -> bool {
-        self.inner.q4k_down_feature_scaled_add(l, f, a, out)
+    fn kquant_down_feature_scaled_add(&self, l: usize, f: usize, a: f32, out: &mut [f32]) -> bool {
+        self.inner.kquant_down_feature_scaled_add(l, f, a, out)
     }
-    fn q4k_matmul_transb(
+    fn kquant_matmul_transb(
         &self,
         l: usize,
         c: usize,
@@ -426,7 +426,7 @@ impl<'a> QuantizedFfnAccess for MaskedGateIndex<'a> {
         x_rows: usize,
         backend: Option<&dyn larql_compute::ComputeBackend>,
     ) -> Option<Vec<f32>> {
-        self.inner.q4k_matmul_transb(l, c, x, x_rows, backend)
+        self.inner.kquant_matmul_transb(l, c, x, x_rows, backend)
     }
 }
 
@@ -481,7 +481,7 @@ fn enumerate_paths(index: &VectorIndex) -> Vec<PathSpec> {
     // ffn_row_* dispatch picks. Always available since it doesn't depend
     // on any has_* flag. Bucket is *vindex-dependent*: on an f16 vindex
     // sparse walks f32 features (Exact); on a Q4K vindex sparse walks
-    // Q4K via q4k_ffn_row_dot (Quantized). primary_storage_bucket()
+    // Q4K via kquant_ffn_row_dot (Quantized). primary_storage_bucket()
     // encapsulates that mapping so future storage formats inherit it.
     out.push(PathSpec {
         name: "sparse",
@@ -546,7 +546,7 @@ fn enumerate_paths(index: &VectorIndex) -> Vec<PathSpec> {
 
     // interleaved_q4k:dequant — mask everything above it. Always
     // Quantized: dequants Q4K bytes per layer.
-    if index.has_interleaved_q4k() {
+    if index.has_interleaved_kquant() {
         out.push(PathSpec {
             name: "interleaved_q4k",
             mask: PathMask {

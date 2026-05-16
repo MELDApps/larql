@@ -8,7 +8,7 @@
 //!
 //! `down_features_q4k.bin` is the W2-of-perf-round-4 sidecar — feature-
 //! major Q4_K down vectors so per-feature decode skips the
-//! `q4k_ffn_layer` whole-layer dequant cache. The legacy interleaved
+//! `kquant_ffn_layer` whole-layer dequant cache. The legacy interleaved
 //! path stays available as the fallback when the sidecar is absent.
 
 use std::sync::Arc;
@@ -58,7 +58,7 @@ impl VectorIndex {
     /// Also reads the optional `interleaved_q4k_manifest.json` sidecar emitted
     /// by the streaming Q4 writer. When the manifest is present callers get
     /// per-matrix layout (offsets, lengths, formats) via
-    /// [`VectorIndex::interleaved_q4k_layer_data`]. When it's absent — older
+    /// [`VectorIndex::interleaved_kquant_layer_data`]. When it's absent — older
     /// vindexes from `build_q4k_weights.rs` — callers fall back to the legacy
     /// uniform-stride path.
     pub fn load_interleaved_q4k(&mut self, dir: &std::path::Path) -> Result<(), VindexError> {
@@ -95,13 +95,13 @@ impl VectorIndex {
         Ok(())
     }
 
-    pub fn has_interleaved_q4k(&self) -> bool {
-        self.storage.has_interleaved_q4k()
+    pub fn has_interleaved_kquant(&self) -> bool {
+        self.storage.has_interleaved_kquant()
     }
 
     /// Load `down_features_q4k.bin` if present (W2 feature-major down).
     /// Silent no-op when the file is absent — older vindexes still work
-    /// via the `q4k_ffn_layer` cache fallback. Idempotent.
+    /// via the `kquant_ffn_layer` cache fallback. Idempotent.
     pub fn load_down_features_q4k(&mut self, dir: &std::path::Path) -> Result<(), VindexError> {
         let path = dir.join(DOWN_FEATURES_Q4K_BIN);
         if !path.exists() {
@@ -140,8 +140,8 @@ impl VectorIndex {
     }
 
     /// Whether feature-major Q4_K-encoded down vectors are loaded.
-    pub fn has_down_features_q4k(&self) -> bool {
-        self.storage.has_down_features_q4k()
+    pub fn has_down_features_kquant(&self) -> bool {
+        self.storage.has_down_features_kquant()
     }
 
     /// Per-layer slice of `down_features_q4k.bin` plus the format tag
@@ -166,14 +166,14 @@ impl VectorIndex {
     /// the manifest has `FFN_COMPONENTS_PER_LAYER` entries for `layer`;
     /// downstream kernels dispatch on the format string (`"Q4_K"` or
     /// `"Q6_K"`).
-    pub fn interleaved_q4k_layer_data(
+    pub fn interleaved_kquant_layer_data(
         &self,
         layer: usize,
     ) -> Option<[(&[u8], &str); FFN_COMPONENTS_PER_LAYER]> {
         // Forwarded through `self.storage` (step 4 of the
         // `VindexStorage` migration). Public signature unchanged so
         // existing callers don't move.
-        let arr = self.storage.interleaved_q4k_layer_data(layer)?;
+        let arr = self.storage.interleaved_kquant_layer_data(layer)?;
         let mut out: [(&[u8], &str); FFN_COMPONENTS_PER_LAYER] =
             [(&[], ""); FFN_COMPONENTS_PER_LAYER];
         for i in 0..FFN_COMPONENTS_PER_LAYER {
@@ -194,9 +194,9 @@ impl VectorIndex {
     /// the legacy uniform Q4_K stride (144 B/256 across all three
     /// matrices) — matches the build_q4k_weights writer.
     #[cfg_attr(not(unix), allow(unused_variables))]
-    pub fn prefetch_interleaved_q4k_layer(&self, layer: usize) {
+    pub fn prefetch_interleaved_kquant_layer(&self, layer: usize) {
         #[cfg(unix)]
-        if let Some(bytes) = self.storage.interleaved_q4k_whole_buffer_view() {
+        if let Some(bytes) = self.storage.interleaved_kquant_whole_buffer_view() {
             let mmap: &[u8] = bytes.as_ref();
             let intermediate = self.num_features(layer);
             if intermediate == 0 {
@@ -206,7 +206,7 @@ impl VectorIndex {
             // manifest is loaded — that's the correct (start, end)
             // span. Without the per-layer view we fall back to the
             // legacy uniform-Q4_K stride.
-            let (start, len) = if let Some(arr) = self.storage.interleaved_q4k_layer_data(layer) {
+            let (start, len) = if let Some(arr) = self.storage.interleaved_kquant_layer_data(layer) {
                 // Span = first component's start to last component's end.
                 let first_start = {
                     let (view, _) = arr[0];

@@ -1,4 +1,4 @@
-//! Autoregressive generation with CPU KV cache.
+//! Autoregressive generation with a CPU [`KvCache`].
 //!
 //! Two-phase decoder:
 //!
@@ -20,17 +20,25 @@
 //!
 //! Works with any [`FfnBackend`] — local `WalkFfn`, `RemoteWalkBackend`
 //! (FFN over HTTP), etc.
+//!
+//! Lifted from `larql-inference::forward::kv_generate` in 2026-05-16.
+//! These loops drive every engine's `prefill` / `decode_step` impl via
+//! [`generate_with_engine`]; [`generate_cached_backend`] is retained as
+//! the parity oracle for the unification migration (see
+//! `larql-inference/docs/specs/kv-engine-unification.md` §8.7).
 
+use larql_inference::attention::{
+    run_attention_block_decode_step_backend, run_attention_with_kv_backend,
+};
+use larql_inference::ffn::FfnBackend;
+use larql_inference::forward::hooks::{LayerHook, NoopHook};
+use larql_inference::forward::{
+    embed_tokens_pub, hidden_to_raw_logits, logits_to_predictions_pub, run_ffn,
+};
+use larql_inference::ModelWeights;
 use ndarray::Array2;
 
-use crate::attention::{
-    run_attention_block_decode_step_backend, run_attention_with_kv_backend, KvCache,
-};
-use crate::ffn::FfnBackend;
-use crate::forward::hooks::{LayerHook, NoopHook};
-use crate::forward::predict::hidden_to_raw_logits;
-use crate::forward::{embed_tokens_pub, logits_to_predictions_pub, run_ffn};
-use crate::model::ModelWeights;
+use crate::cache::KvCache;
 
 /// Stream autoregressive generation with a KV cache.
 ///
@@ -163,12 +171,12 @@ fn generate_cached_bounded(
 /// registered, so we keep the fast path fast). When you need hooks
 /// during multi-token generation use this CPU path instead — typically
 /// 5–20× slower than the Metal path on the same model, but every
-/// primitive in [`crate::forward::hooks`] works end-to-end.
+/// primitive in [`larql_inference::forward::hooks`] works end-to-end.
 ///
 /// The `on_attention_weights` and `on_ffn_activation` callbacks do
 /// **not** fire on this path — the production decode kernels don't
 /// capture those intermediates. Use
-/// [`crate::forward::trace::trace_forward_full_hooked`] for a single
+/// [`larql_inference::forward::trace_forward_full_hooked`] for a single
 /// forward pass when you need them.
 #[allow(clippy::too_many_arguments)]
 pub fn generate_cached_hooked<F>(
@@ -198,7 +206,7 @@ where
     )
 }
 
-/// Drive autoregressive generation through any [`KvEngine`].
+/// Drive autoregressive generation through any [`crate::KvEngine`].
 ///
 /// This is the engine-trait-based equivalent of [`generate_cached_backend`]:
 /// same prefill → sample → decode loop → sample → ... shape, but the
@@ -211,7 +219,7 @@ where
 /// returned `Vec<u32>` is bit-identical to
 /// `generate_cached_backend(weights, tokenizer, ffn, prompt, max,
 /// backend, window, ...)`. This is the parity gate for the unification
-/// migration (see `docs/specs/kv-engine-unification.md` §8.4).
+/// migration (see `larql-inference/docs/specs/kv-engine-unification.md` §8.4).
 pub fn generate_with_engine<F>(
     engine: &mut dyn crate::KvEngine,
     weights: &ModelWeights,
@@ -278,7 +286,7 @@ where
 ///
 /// Returns `None` if the prompt is empty or if any layer's attention
 /// fails. This is the production K/V cache prefill loop, extracted so
-/// `KvEngine::prefill` impls in `larql-kv` can call it directly.
+/// `KvEngine::prefill` impls can call it directly.
 ///
 /// The caller applies `final_norm + lm_head` to the returned hidden
 /// state to get logits.
@@ -307,9 +315,6 @@ pub fn kv_prefill_run(
         let (mut h_post_attn, k_rope, v) =
             run_attention_with_kv_backend(weights, &h, layer, backend)?;
         cache.layers[layer] = Some((k_rope, v));
-        // Apply the window bound immediately — if prompt is longer
-        // than the window, attention during later decode steps only
-        // sees the last W positions of the prompt.
         cache.clip_layer(layer);
 
         hook.on_post_attention(layer, &mut h_post_attn);
@@ -319,10 +324,6 @@ pub fn kv_prefill_run(
         hook.on_post_layer(layer, &mut h_out);
         h = h_out;
     }
-    // After prefill, the "next" absolute position is prompt_len.
-    // Clipping shortens the cache rows but does NOT change the next
-    // token's absolute position — new K gets RoPE at prompt_len
-    // regardless of how many older positions were evicted.
     cache.next_position = prompt_ids.len();
 
     Some((last_row_as_2d(&h), cache))
@@ -336,7 +337,7 @@ pub fn kv_prefill_run(
 ///
 /// Returns `None` if any layer's attention fails. This is the
 /// production decode step extracted so `KvEngine::decode_step` impls
-/// in `larql-kv` can call it directly.
+/// can call it directly.
 #[allow(clippy::too_many_arguments)]
 pub fn kv_decode_step_run(
     weights: &ModelWeights,
@@ -363,8 +364,6 @@ pub fn kv_decode_step_run(
             backend,
         )?;
         cache.layers[layer] = Some(new_kv);
-        // Sliding window — evict the oldest row(s) if we've
-        // exceeded `max_window`. No-op when unbounded.
         cache.clip_layer(layer);
 
         hook.on_post_attention(layer, &mut h_post_attn);
@@ -401,7 +400,6 @@ fn generate_cached_hooked_inner(
             None => return Vec::new(),
         };
 
-    // Sample first new token from the prefill-end hidden state.
     let first = match argmax_next_token(weights, tokenizer, &last_hidden) {
         Some(t) => t,
         None => return Vec::new(),
@@ -417,14 +415,12 @@ fn generate_cached_hooked_inner(
         return generated;
     }
 
-    // ── Phase 2: decode loop ──
     let mut current_id = first.0;
     for _step in 1..max_new_tokens {
         let h_step = match kv_decode_step_run(weights, ffn, &mut cache, current_id, backend, hook) {
             Some(h) => h,
             None => break,
         };
-        // h_step is [1, hidden] — project to logits and argmax.
         let (id, tok_str) = match argmax_next_token(weights, tokenizer, &h_step) {
             Some(t) => t,
             None => break,
@@ -453,9 +449,6 @@ fn argmax_next_token(
     tokenizer: &tokenizers::Tokenizer,
     h_single: &Array2<f32>,
 ) -> Option<(u32, String)> {
-    // `logits_to_predictions_pub` does final norm + lm_head + softmax +
-    // top-k. We ask for top-1 and decode. Emits PredictResult with
-    // `token_ids` parallel to `predictions`.
     let result = logits_to_predictions_pub(weights, h_single, tokenizer, 1, 1.0);
     let id = *result.token_ids.first()?;
     let (decoded, _) = result.predictions.first()?.clone();
@@ -467,7 +460,6 @@ fn is_stop_token_str(s: &str) -> bool {
         s,
         "<eos>" | "</s>" | "<|endoftext|>" | "<|im_end|>"
             | "<|end_of_turn|>" | "<end_of_turn>"
-            // Llama-3: pretraining EOS, eom_id, eot_id (128001 / 128008 / 128009)
             | "<|end_of_text|>" | "<|eom_id|>" | "<|eot_id|>"
     )
 }
@@ -502,7 +494,6 @@ where
     let num_layers = weights.num_layers;
     let mut cache = KvCache::with_layers(num_layers);
 
-    // ── Prefill ──
     let mut h = embed_tokens_pub(weights, prompt_ids);
     for layer in 0..num_layers {
         let (h_post_attn, k_rope, v) = match run_attention_with_kv_backend(weights, &h, layer, None)
@@ -516,7 +507,6 @@ where
     }
     cache.next_position = prompt_ids.len();
 
-    // ── First token from prefill ──
     let last_hidden = last_row_as_2d(&h);
     let mut logits = hidden_to_raw_logits(weights, &last_hidden);
     let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
@@ -531,7 +521,6 @@ where
         return generated;
     }
 
-    // ── Decode loop ──
     let mut current_id = first_id;
     for _step in 1..max_new_tokens {
         let h_new = embed_tokens_pub(weights, &[current_id]);
@@ -573,7 +562,6 @@ where
     generated
 }
 
-/// Argmax over a (possibly masked) logit vector — returns `(token_id, decoded)`.
 fn masked_argmax(logits: &[f32], tokenizer: &tokenizers::Tokenizer) -> Option<(u32, String)> {
     let (idx, _) = logits
         .iter()
@@ -588,8 +576,8 @@ fn masked_argmax(logits: &[f32], tokenizer: &tokenizers::Tokenizer) -> Option<(u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffn::WeightFfn;
-    use crate::test_utils::{make_test_tokenizer, make_test_weights};
+    use larql_inference::ffn::WeightFfn;
+    use larql_inference::test_utils::{make_test_tokenizer, make_test_weights};
 
     #[test]
     fn generate_cached_returns_token_ids() {
@@ -619,7 +607,7 @@ mod tests {
             &ffn,
             &[0u32],
             4,
-            Some(2), // sliding window of 2
+            Some(2),
             |_, _| {},
         );
         assert!(ids.len() <= 4);
@@ -627,17 +615,13 @@ mod tests {
 
     // ── generate_with_engine coverage ─────────────────────────────────────
     //
-    // The engine-dispatch helper is exercised end-to-end by `larql-kv`'s
-    // parity tests, but `cargo llvm-cov` doesn't credit cross-crate
-    // coverage. These in-crate tests use a synthetic engine that returns
-    // deterministic hidden states to drive the helper through each branch:
-    // empty inputs, max_new_tokens=0, max_new_tokens=1, normal multi-step
-    // generation, prefill failure, decode failure.
-
-    use super::{generate_with_engine, kv_decode_step_run, kv_prefill_run};
+    // Synthetic engine that returns deterministic hidden states to drive
+    // the helper through each branch: empty inputs, max_new_tokens=0,
+    // max_new_tokens=1, normal multi-step generation, prefill failure,
+    // decode failure.
 
     struct StubEngine {
-        cache: Option<crate::attention::KvCache>,
+        cache: Option<KvCache>,
         fail_prefill: bool,
         fail_decode_after: Option<usize>,
         decode_count: usize,
@@ -781,7 +765,6 @@ mod tests {
         let tokenizer = make_test_tokenizer(weights.vocab_size);
         let ffn = WeightFfn { weights: &weights };
         let mut eng = fresh_stub();
-        // First decode_step returns hidden; second returns None.
         eng.fail_decode_after = Some(1);
         let out = generate_with_engine(
             &mut eng,
@@ -792,7 +775,6 @@ mod tests {
             5,
             |_, _| {},
         );
-        // Prefill produces token 0, decode 1 produces token 1, decode 2 fails.
         assert!(
             out.len() <= 2,
             "should break after decode failure, got {} tokens",
@@ -812,7 +794,7 @@ mod tests {
             &[2u32, 3],
             2,
             None,
-            None, // no backend override, no window
+            None,
             |_, _| {},
         );
         assert!(ids.len() <= 2);
@@ -823,7 +805,6 @@ mod tests {
         let weights = make_test_weights();
         let tokenizer = make_test_tokenizer(weights.vocab_size);
         let ffn = WeightFfn { weights: &weights };
-        // Allow only tokens 0..8 by masking the rest to NEG_INFINITY
         let allowed: std::collections::HashSet<u32> = (0u32..8).collect();
         let ids = generate_cached_constrained(
             &weights,
@@ -840,7 +821,6 @@ mod tests {
             },
             |_, _| {},
         );
-        // All generated tokens should be in the allowed set (or empty if all masked)
         for &id in &ids {
             assert!(
                 allowed.contains(&id),
@@ -854,7 +834,6 @@ mod tests {
         let weights = make_test_weights();
         let tokenizer = make_test_tokenizer(weights.vocab_size);
         let ffn = WeightFfn { weights: &weights };
-        // Empty prompt still generates (starts from embed of nothing → zeros)
         let ids = generate_cached(&weights, &tokenizer, &ffn, &[], 2, |_, _| {});
         assert!(ids.len() <= 2);
     }
@@ -869,8 +848,6 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn generate_cached_hooked_with_noop_matches_baseline() {
-        // Hook-aware generation with a NoopHook should produce the same
-        // tokens as the unhooked path.
         let weights = make_test_weights();
         let tokenizer = make_test_tokenizer(weights.vocab_size);
         let ffn = WeightFfn { weights: &weights };
@@ -885,7 +862,7 @@ mod tests {
             4,
             None,
             None,
-            &mut crate::forward::NoopHook,
+            &mut NoopHook,
             |_, _| {},
         );
 
@@ -894,8 +871,6 @@ mod tests {
 
     #[test]
     fn generate_cached_hooked_record_fires_during_prefill_and_decode() {
-        // RecordHook should fire on every layer of every step (prefill +
-        // each decode step). Test by counting on_post_layer calls.
         struct CountHook {
             calls: std::collections::HashMap<usize, usize>,
         }
@@ -925,9 +900,6 @@ mod tests {
             |_, _| {},
         );
 
-        // Prefill = 1 pass through all layers; decode = (max_new - 1) more.
-        // First token comes out of prefill; subsequent tokens each run
-        // their own decode step. So expected per-layer calls ≈ 1 + (max_new - 1) = max_new.
         for layer in 0..weights.num_layers {
             let count = *hook.calls.get(&layer).unwrap_or(&0);
             assert!(
@@ -943,9 +915,7 @@ mod tests {
 
     #[test]
     fn generate_cached_hooked_steer_changes_output() {
-        // A non-trivial steering vector applied at every layer should
-        // shift at least one generated token vs the unsteered baseline.
-        use crate::forward::SteerHook;
+        use larql_inference::forward::SteerHook;
         use ndarray::Array1;
 
         let weights = make_test_weights();
@@ -955,7 +925,6 @@ mod tests {
 
         let baseline = generate_cached(&weights, &tokenizer, &ffn, &prompt, 4, |_, _| {});
 
-        // Big steering vector (5.0 * uniform-ish ramp) at the first layer.
         let v = Array1::from_vec(
             (0..weights.hidden_size)
                 .map(|i| (i as f32 + 1.0) * 0.1)
@@ -975,8 +944,6 @@ mod tests {
             |_, _| {},
         );
 
-        // Generation may stop early due to EOS — only require divergence
-        // when both paths produced tokens.
         if !baseline.is_empty() && !steered.is_empty() {
             assert_ne!(
                 baseline, steered,

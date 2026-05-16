@@ -306,7 +306,7 @@ pub fn recompute_kv(
     // Saves the dequant-to-f32 cost (8× memory bandwidth) when the
     // backend supports Q4K matvec and the vindex has Q4K attn data.
     let q4k_path = index
-        .and_then(|idx| idx.attn_q4k_layer_data(layer))
+        .and_then(|idx| idx.attn_kquant_layer_data(layer))
         .filter(|_| backend.has_q4());
 
     let (mut k, mut v) = if let Some(attn_data) = q4k_path {

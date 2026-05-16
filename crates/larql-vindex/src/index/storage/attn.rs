@@ -162,8 +162,8 @@ impl VectorIndex {
     ///
     /// Forwarded through [`VectorIndex::storage`] (step 4 of the
     /// `VindexStorage` migration). Public signature unchanged.
-    pub fn attn_q4k_layer_data(&self, layer: usize) -> Option<[(&[u8], &str); 4]> {
-        let arr = self.storage.attn_q4k_layer_data(layer)?;
+    pub fn attn_kquant_layer_data(&self, layer: usize) -> Option<[(&[u8], &str); 4]> {
+        let arr = self.storage.attn_kquant_layer_data(layer)?;
         let mut out: [(&[u8], &str); ATTN_TENSORS_PER_LAYER] = [(&[], ""); ATTN_TENSORS_PER_LAYER];
         for i in 0..ATTN_TENSORS_PER_LAYER {
             let (view, fmt) = arr[i];
@@ -392,8 +392,8 @@ mod tests {
 
     /// A stale or corrupt Q4_K manifest entry whose `offset + length`
     /// runs past the mmap end must produce `None` from
-    /// `attn_q4k_layer_data`, not a slice-bounds panic. Mirrors the
-    /// defensive behavior already in `interleaved_q4k_layer_data`.
+    /// `attn_kquant_layer_data`, not a slice-bounds panic. Mirrors the
+    /// defensive behavior already in `interleaved_kquant_layer_data`.
     #[test]
     fn attn_q4k_layer_data_returns_none_on_out_of_bounds_manifest() {
         use larql_models::quant::ggml::{K_QUANT_BLOCK_ELEMS, Q4_K_BLOCK_BYTES};
@@ -442,7 +442,7 @@ mod tests {
         let storage = std::sync::Arc::make_mut(&mut idx.storage);
         let m = storage.attn_q4k_manifest.as_mut().expect("manifest");
         m[2] = (len, 1, "Q4_K".to_string()); // offset = len → end = len + 1 > mmap.len()
-        assert!(idx.attn_q4k_layer_data(0).is_none());
+        assert!(idx.attn_kquant_layer_data(0).is_none());
     }
 
     /// `attn_q8_layer_data` must reject a manifest entry where

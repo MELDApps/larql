@@ -55,7 +55,7 @@ pub const DOWN_WEIGHTS_BIN: &str = "down_weights.bin";
 /// On-disk PyTorch `nn.Linear` orientation for down is
 /// `[hidden, intermediate]`, so a single feature's down vector requires
 /// gathering across `hidden` separate rows — there is no per-feature
-/// row decode. The legacy code path (`q4k_ffn_layer` + cache) amortises
+/// row decode. The legacy code path (`kquant_ffn_layer` + cache) amortises
 /// this by dequantising the whole layer to f32 and transposing once.
 ///
 /// Emitting `down_features_q4k.bin` at extract time stores down already

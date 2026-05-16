@@ -143,7 +143,7 @@ impl ResidualCapture {
 
         // Build pipeline layers — same wiring `layer_graph::generate` uses.
         let gate_index: &dyn GateIndex = index;
-        let (q4_ffn, ffn_is_q4k) = if let Some(m) = gate_index.interleaved_q4k_mmap_ref() {
+        let (q4_ffn, ffn_is_q4k) = if let Some(m) = gate_index.interleaved_kquant_mmap_ref() {
             (Some(m), true)
         } else {
             (gate_index.interleaved_q4_mmap_ref(), false)
@@ -238,7 +238,7 @@ impl ResidualCapture {
         backend.preallocate_kv_cache_per_layer(&kv_shapes, DEFAULT_GPU_KV_CACHE_MAX_SEQ);
 
         let gate_index: &dyn GateIndex = index;
-        let (q4_ffn, ffn_is_q4k) = if let Some(m) = gate_index.interleaved_q4k_mmap_ref() {
+        let (q4_ffn, ffn_is_q4k) = if let Some(m) = gate_index.interleaved_kquant_mmap_ref() {
             (Some(m), true)
         } else {
             (gate_index.interleaved_q4_mmap_ref(), false)

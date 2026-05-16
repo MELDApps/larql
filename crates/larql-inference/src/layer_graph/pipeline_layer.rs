@@ -288,7 +288,7 @@ pub fn resolve_attn_weights<'a>(
         }
     }
 
-    if let Some([q, k, v, o]) = index.attn_q4k_layer_data(layer) {
+    if let Some([q, k, v, o]) = index.attn_kquant_layer_data(layer) {
         Some((
             QuantWeight {
                 data: q.0,
@@ -368,7 +368,7 @@ pub fn resolve_ffn_weights<'a>(
         }
     }
 
-    if let Some([gate, up, down]) = index.interleaved_q4k_layer_data(layer) {
+    if let Some([gate, up, down]) = index.interleaved_kquant_layer_data(layer) {
         return (
             QuantWeight {
                 data: gate.0,
