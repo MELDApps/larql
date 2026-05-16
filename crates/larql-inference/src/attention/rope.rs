@@ -332,4 +332,112 @@ mod tests {
             );
         }
     }
+
+    // ── llama3 wavelength-band scaling ──────────────────────────────
+    //
+    // HF's `_compute_llama3_parameters` partitions the rotary frequency
+    // band into three regimes by wavelength: fast (passthrough), slow
+    // (divided by factor), and a smooth interpolation between. These
+    // tests pin each regime against a hand-computed value so a future
+    // refactor of the formula gets caught here, not by a 0.5 % bits/char
+    // regression caught hours later by `shannon verify`.
+
+    fn llama3_default() -> Llama3RopeScaling {
+        // Llama-3.2-1B canonical config.
+        Llama3RopeScaling {
+            factor: 32.0,
+            low_freq_factor: 1.0,
+            high_freq_factor: 4.0,
+            original_max_position_embeddings: 8192.0,
+        }
+    }
+
+    #[test]
+    fn llama3_fast_freq_passthrough() {
+        let s = llama3_default();
+        // wavelen = 2π / inv → for inv = 1.0, wavelen ≈ 6.28, which is
+        // well below high_freq_wavelen = 8192/4 = 2048. Fast regime →
+        // passthrough unchanged.
+        let out = apply_llama3_inv_freq(&s, &[1.0]);
+        assert!((out[0] - 1.0).abs() < 1e-12, "fast freq must be unchanged");
+    }
+
+    #[test]
+    fn llama3_slow_freq_divided_by_factor() {
+        let s = llama3_default();
+        // wavelen = 2π / inv → for inv = 1e-5, wavelen ≈ 628_318, well
+        // above low_freq_wavelen = 8192/1 = 8192. Slow regime →
+        // `inv / factor`.
+        let inv = 1e-5_f64;
+        let out = apply_llama3_inv_freq(&s, &[inv]);
+        assert!(
+            (out[0] - inv / s.factor).abs() < 1e-15,
+            "slow freq must be inv/factor; got {} vs expected {}",
+            out[0],
+            inv / s.factor
+        );
+    }
+
+    #[test]
+    fn llama3_medium_freq_smooth_interpolation() {
+        let s = llama3_default();
+        // Pick inv so wavelen sits squarely between high_freq_wavelen
+        // (2048) and low_freq_wavelen (8192). With wavelen = 4096
+        // (geometric midpoint area):
+        //   inv = 2π / 4096 ≈ 0.001534
+        //   smooth = (8192/4096 - 1) / (4 - 1) = (2 - 1) / 3 = 0.333...
+        //   expected = (1 - 1/3) * inv/32 + (1/3) * inv
+        let inv = std::f64::consts::TAU / 4096.0;
+        let smooth = (8192.0 / (std::f64::consts::TAU / inv) - 1.0) / (4.0 - 1.0);
+        let expected = (1.0 - smooth) * inv / s.factor + smooth * inv;
+        let out = apply_llama3_inv_freq(&s, &[inv]);
+        assert!(
+            (out[0] - expected).abs() < 1e-12,
+            "medium-freq smoothing wrong: got {} vs expected {}",
+            out[0],
+            expected
+        );
+        // And: result must be bracketed by the slow-regime and fast-regime
+        // values, since smoothing is a convex combination.
+        assert!(
+            out[0] > inv / s.factor && out[0] < inv,
+            "medium-freq result must sit between slow (inv/factor) and fast (inv)"
+        );
+    }
+
+    #[test]
+    fn llama3_apply_preserves_length() {
+        let s = llama3_default();
+        let inv_freq: Vec<f64> = (0..32)
+            .map(|i| 1.0 / (10000.0_f64.powf(i as f64 / 32.0)))
+            .collect();
+        let out = apply_llama3_inv_freq(&s, &inv_freq);
+        assert_eq!(out.len(), inv_freq.len());
+        assert!(out.iter().all(|v| v.is_finite()));
+        // Monotonicity: scaled inv_freq is still monotonically decreasing
+        // because each band's transform preserves order within and across
+        // bands (slow regime divides by a constant, fast regime passes
+        // through, smoothing is monotonic in inv).
+        let mono = out.windows(2).all(|w| w[0] >= w[1]);
+        assert!(mono, "llama3-scaled inv_freq lost monotonicity");
+    }
+
+    #[test]
+    fn apply_rope_partial_at_full_with_and_without_llama3_differ() {
+        // Sanity check that the llama3 branch of apply_rope_partial_at_full
+        // actually changes output. Use rope_base = 10_000 so the rotary
+        // frequencies span the wavelength bands for our default scaling.
+        let x = make_qk(4, 1, 32);
+        let base = apply_rope_partial_at_full(&x, 1, 32, 10000.0, 1.0, 0, 1.0, None);
+        let scaled =
+            apply_rope_partial_at_full(&x, 1, 32, 10000.0, 1.0, 0, 1.0, Some(llama3_default()));
+        let differ = base
+            .iter()
+            .zip(scaled.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-6);
+        assert!(
+            differ,
+            "llama3 scaling must change RoPE output for non-zero positions"
+        );
+    }
 }

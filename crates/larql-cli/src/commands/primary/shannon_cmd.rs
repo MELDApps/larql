@@ -659,7 +659,14 @@ fn run_verify(args: VerifyArgs) -> Result<(), Box<dyn std::error::Error>> {
     let (max_delta_pct, max_pair) = max_pairwise_delta_pct(&results);
     let pass = max_delta_pct <= args.threshold;
     if args.json {
-        emit_verify_json(&results, reference_idx, max_delta_pct, max_pair, args.threshold, pass);
+        emit_verify_json(
+            &results,
+            reference_idx,
+            max_delta_pct,
+            max_pair,
+            args.threshold,
+            pass,
+        );
     }
     print_verdict(max_delta_pct, max_pair, args.threshold)
 }
@@ -778,7 +785,9 @@ fn spawn_reference_scorer(
 ) -> Result<VerifyResult, Box<dyn std::error::Error>> {
     eprintln!("[{engine}] launching {} ...", script.display());
     let start = Instant::now();
-    let mut r = run_python_scorer(engine, python, script, model, corpus, context, stride, device)?;
+    let mut r = run_python_scorer(
+        engine, python, script, model, corpus, context, stride, device,
+    )?;
     r.elapsed_secs = start.elapsed().as_secs_f64();
     Ok(r)
 }

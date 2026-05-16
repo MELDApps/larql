@@ -317,8 +317,7 @@ pub fn run_attention_block_decode_step_backend(
         Some(norm_w) => rms_norm_heads(&q_full, norm_w, num_q, head_dim, qk_norm_off),
         None => q_full,
     };
-    let layer_rope_base =
-        crate::forward_overrides::effective_rope_base_for_layer(arch, layer);
+    let layer_rope_base = crate::forward_overrides::effective_rope_base_for_layer(arch, layer);
     let rotary_frac = arch.rotary_fraction_for_layer(layer);
     let pos_divisor =
         crate::forward_overrides::effective_rope_position_divisor_for_layer(arch, layer);

@@ -961,15 +961,32 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
     if let Some(grpc_port) = cli.grpc_port {
         let grpc_addr = format!("{}:{}", cli.host, grpc_port).parse()?;
         let grpc_state = Arc::clone(&state);
-        // Exp 53 ShardService cache. Built here (not on AppState) so the
-        // feature is wholly opt-in via `--shard-query-tau` and adds no
-        // bytes to deployments that don't run a sharded vindex cache.
-        let shard_cache = cli.shard_query_tau.map(|tau| {
+        // Exp 53 ShardService. Vindex-backed: the cache shares the
+        // server's loaded `PatchedVindex`, so "compiled facts" live as
+        // vindex patches (via `PatchedVindex::add_patch` etc.) and we
+        // don't maintain a separate on-disk cache format. Opt-in via
+        // `--shard-query-tau`; deployments that don't set it pay zero
+        // for the feature.
+        let shard_source = cli.shard_query_tau.and_then(|tau| {
+            let model = state.models.first()?;
             info!(
-                "ShardService: enabled with tau={tau}, cache starts empty (loaders are follow-up work)"
+                "ShardService: enabled on model {} with tau={tau} (vindex-backed)",
+                model.id
             );
-            std::sync::Arc::new(tokio::sync::RwLock::new(
-                crate::shard_query::ShardCache::new(tau),
+            // `PatchedVindex` itself isn't `Clone`, but its underlying
+            // `VectorIndex` is (refcount bump on the Arc'd substores).
+            // Build a fresh `PatchedVindex` wrapping a clone of the
+            // model's base — patches added to `model.patched` later
+            // don't propagate to the shard view in v1. The follow-up
+            // is to put `model.patched` behind an `Arc<RwLock<…>>` so
+            // the shard service and the inference path share the same
+            // patch lineage. Matches the "transport-layer port"
+            // framing: prove the wire works, plumb sharing later.
+            let base_clone = model.patched.blocking_read().base.clone();
+            let shard_patched = larql_vindex::PatchedVindex::new(base_clone);
+            Some(crate::shard_query::ShardSource::vindex(
+                std::sync::Arc::new(tokio::sync::RwLock::new(shard_patched)),
+                tau,
             ))
         });
         info!("gRPC: listening on {}", grpc_addr);
@@ -985,11 +1002,10 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
                     grpc::proto::vindex_service_server::VindexServiceServer::new(vindex_svc),
                 )
                 .add_service(larql_router_protocol::ExpertServiceServer::new(expert_svc));
-            if let Some(cache) = shard_cache {
-                let shard_svc = crate::shard_query::ShardGrpcService::new(cache);
-                builder = builder.add_service(
-                    larql_router_protocol::ShardServiceServer::new(shard_svc),
-                );
+            if let Some(source) = shard_source {
+                let shard_svc = crate::shard_query::ShardGrpcService::new(source);
+                builder =
+                    builder.add_service(larql_router_protocol::ShardServiceServer::new(shard_svc));
             }
             if let Err(e) = builder.serve(grpc_addr).await {
                 tracing::error!("gRPC server error: {}", e);

@@ -54,7 +54,10 @@ pub async fn download_and_load_shard(
     }
 
     let bytes = resp.bytes().await?;
-    info!(bytes = bytes.len(), "Mode B: download complete — unpacking…");
+    info!(
+        bytes = bytes.len(),
+        "Mode B: download complete — unpacking…"
+    );
 
     let skip_hash = expected_hash.is_empty()
         || expected_hash == "0000000000000000"
@@ -183,11 +186,11 @@ mod tests {
         assert_eq!(layer, &[1u8, 2, 3, 4]);
 
         // tmp directory must have been renamed away.
-        let tmp_dir = tmp
-            .path()
-            .join("gemma-test")
-            .join(".tmp-layers-0-5");
-        assert!(!tmp_dir.exists(), "stale tmp directory survived: {tmp_dir:?}");
+        let tmp_dir = tmp.path().join("gemma-test").join(".tmp-layers-0-5");
+        assert!(
+            !tmp_dir.exists(),
+            "stale tmp directory survived: {tmp_dir:?}"
+        );
 
         // Idempotent re-call must not fail.
         download_and_load_shard(&origin, store, "", "gemma-test", 0, 5)

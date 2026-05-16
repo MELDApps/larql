@@ -22,9 +22,9 @@ needing the env vars — at which point you'll know the fixes worked.
 """
 
 import argparse
+import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -162,29 +162,42 @@ def run_q4k_metal(case: TestCase, corpus: Path) -> Optional[dict]:
 
 
 def parse_verify_output(text: str) -> Optional[dict]:
-    """Extract per-engine rows + max delta from `shannon verify` stdout."""
-    rows = {}
-    for line in text.splitlines():
-        m = re.match(
-            r"(rust|mlx|hf)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([+\-\d.%—]+)\s+([\d.]+)s",
-            line,
-        )
-        if m:
-            engine = m.group(1)
+    """Extract the structured verify result from `shannon verify --json` stdout.
+
+    Looks for the final `RESULT_PREFIX` line on stdout (the same prefix the
+    Python reference scorers emit) and parses its JSON payload. The payload
+    schema is set in `crates/larql-cli/src/commands/primary/shannon_cmd.rs`
+    (`emit_verify_json`); update both sides in lockstep if it changes.
+
+    Reshapes the engines list into a dict keyed by engine name so existing
+    consumers can still do `engines["hf"]["bits_per_char"]`.
+    """
+    for line in reversed(text.splitlines()):
+        if not line.startswith(RESULT_PREFIX):
+            continue
+        try:
+            payload = json.loads(line[len(RESULT_PREFIX):].strip())
+        except json.JSONDecodeError:
+            return None
+        rows = {}
+        for entry in payload.get("engines", []):
+            engine = entry.get("engine")
+            if engine is None:
+                continue
             rows[engine] = {
-                "tokens": int(m.group(2)),
-                "bits_per_token": float(m.group(3)),
-                "bits_per_char": float(m.group(4)),
-                "total_bits": float(m.group(5)),
-                "delta_str": m.group(6),
-                "elapsed_secs": float(m.group(7)),
+                "tokens": entry.get("tokens_scored", 0),
+                "bits_per_token": entry.get("bits_per_token", 0.0),
+                "bits_per_char": entry.get("bits_per_char", 0.0),
+                "total_bits": entry.get("total_bits", 0.0),
+                "elapsed_secs": entry.get("elapsed_secs", 0.0),
             }
-    m = re.search(r"max pair-wise delta:\s+([\d.]+)%\s+\((\w+)\s+vs\s+(\w+)\)", text)
-    if m:
+        max_pair = payload.get("max_pair", ["", ""])
         return {
             "engines": rows,
-            "max_delta_pct": float(m.group(1)),
-            "max_pair": (m.group(2), m.group(3)),
+            "max_delta_pct": payload.get("max_delta_pct", 0.0),
+            "max_pair": (max_pair[0], max_pair[1]),
+            "reference": payload.get("reference", ""),
+            "pass": payload.get("pass", False),
         }
     return None
 
@@ -198,6 +211,7 @@ def run_verify(case: TestCase, corpus: Path, threshold: float, engines: str) -> 
         "--stride", "256",
         "--threshold", str(threshold),
         "--engines", engines,
+        "--json",
     ]
     env = dict(os.environ)
     env.update(case.env)

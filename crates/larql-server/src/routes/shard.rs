@@ -102,9 +102,7 @@ pub async fn handle_shard(
         // sometimes resolve through cache-style symlinks.
         tar.follow_symlinks(true);
         if let Err(e) = tar.append_dir_all(".", &shard_dir) {
-            let _ = tx.blocking_send(Err(std::io::Error::other(format!(
-                "tar build failed: {e}"
-            ))));
+            let _ = tx.blocking_send(Err(std::io::Error::other(format!("tar build failed: {e}"))));
             return;
         }
         if let Err(e) = tar.finish() {

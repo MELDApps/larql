@@ -1,6 +1,6 @@
 # KV Engine Unification — Specification
 
-**Status:** Draft, pending review.
+**Status:** Implementation in progress (steps 1-5 of 7 landed; step 6 — surface — pending).
 **Audience:** LARQL contributors.
 **Scope:** Replace the parallel "live decode cache" and "research KV engine"
 code paths with a single `KvEngine`-based dispatch, so `larql run` / `larql
@@ -271,7 +271,7 @@ dispatch path.
 Each step is independently reversible. Each step has a parity guarantee
 so the default user experience is byte-identical until §8.5.
 
-### 8.1 Step 1 — move trait surface into `larql-inference`
+### 8.1 Step 1 — move trait surface into `larql-inference` ✅ landed
 
 Move the **trait surface** out of `larql-kv/src/lib.rs` into
 `larql-inference` (new module, e.g. `larql-inference/src/kv_engine.rs`):
@@ -303,7 +303,7 @@ not move.
 **Parity:** Pure trait relocation behind re-exports. Every crate
 compiles. Every test passes. No semantic change anywhere.
 
-### 8.2 Step 2 — trait widening (no behaviour change)
+### 8.2 Step 2 — trait widening (no behaviour change) ✅ landed
 
 Widen `KvEngine::{prefill, decode_step, prefill_q4k, decode_step_q4k}`
 to accept `&dyn FfnBackend`. `FfnBackend` itself is decided at
@@ -322,7 +322,7 @@ without modification.
 
 **Parity:** `larql bench --engine *` byte-identical pre/post.
 
-### 8.3 Step 3 — introduce `Standard` and `NoCache` engines
+### 8.3 Step 3 — introduce `Standard` and `NoCache` engines ✅ landed
 
 Add two new `KvEngine` impls in `larql-kv`:
 
@@ -346,7 +346,7 @@ in their `decode_step` signatures.
 go through `generate_cached_backend` directly. The engines exist but
 are unused outside their own unit tests.
 
-### 8.4 Step 4 — dispatch through `KvEngine`, opt-in
+### 8.4 Step 4 — dispatch through `KvEngine`, opt-in ✅ landed (parity gate met)
 
 Behind an internal feature gate (e.g. `LARQL_KV_ENGINE_DISPATCH=1`),
 `walk_cmd.rs:1049-1075` dispatches through
@@ -363,7 +363,7 @@ on all three `KvCacheKind` values (`standard` → `Standard { None }`,
 parity is not bit-exact on any of the three, this step does not land.
 Step 5 cannot start until all three pass.
 
-### 8.5 Step 5 — flip default
+### 8.5 Step 5 — flip default ✅ landed (env gate removed; engine dispatch is the only path in `walk_cmd::generate_stream`)
 
 Remove the env var gate; `walk_cmd.rs` dispatches through `KvEngine`
 unconditionally. `generate_cached_backend` becomes a thin wrapper that

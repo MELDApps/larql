@@ -209,3 +209,91 @@ pub fn effective_rope_position_divisor_for_layer(
     // Default: ask the architecture (parsed from rope_scaling in config.json).
     arch.rope_position_divisor_for_layer(layer)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The env-var-reading helpers use OnceLock, so they read process env
+    // exactly once. We can't unset/reset them within a test process, so
+    // these tests exercise the *arch-driven* fallback path that runs when
+    // the env vars are unset (which is also the production path).
+
+    fn gemma3_with_linear_scaling() -> Box<dyn larql_models::ModelArchitecture> {
+        // Minimal Gemma 3 config with the structured per-layer-type
+        // rope_scaling form that triggers the "factor on global layers
+        // only" code path in `Gemma3Arch`.
+        larql_models::detect_from_json(&serde_json::json!({
+            "model_type": "gemma3",
+            "text_config": {
+                "model_type": "gemma3_text",
+                "hidden_size": 2560,
+                "head_dim": 256,
+                "num_hidden_layers": 34,
+                "num_attention_heads": 8,
+                "intermediate_size": 10240,
+                "sliding_window": 1024,
+                "rope_scaling": {
+                    "full_attention": {"rope_type": "linear", "factor": 8.0},
+                    "sliding_attention": {"rope_type": "default"},
+                },
+            },
+        }))
+    }
+
+    #[test]
+    fn effective_rope_position_divisor_uses_arch_on_global_layer() {
+        // No env vars set → defer to arch. Layer 5 is global on Gemma 3
+        // (5 + 1 = 6, multiple of 6), so the linear factor 8.0 must come
+        // through.
+        let arch = gemma3_with_linear_scaling();
+        assert_eq!(effective_rope_position_divisor_for_layer(&*arch, 5), 8.0);
+    }
+
+    #[test]
+    fn effective_rope_position_divisor_uses_arch_on_sliding_layer() {
+        // Layer 0 is sliding → factor must NOT apply, divisor stays 1.0.
+        let arch = gemma3_with_linear_scaling();
+        assert_eq!(effective_rope_position_divisor_for_layer(&*arch, 0), 1.0);
+    }
+
+    #[test]
+    fn effective_llama3_returns_none_without_arch_scaling_or_env() {
+        // Arch with no rope_scaling at all → None.
+        let arch = larql_models::detect_from_json(&serde_json::json!({
+            "model_type": "llama",
+            "hidden_size": 2048,
+            "num_hidden_layers": 16,
+            "intermediate_size": 8192,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+        }));
+        assert!(effective_llama3_rope_scaling(&*arch).is_none());
+    }
+
+    #[test]
+    fn effective_llama3_returns_arch_scaling_when_set() {
+        // Arch with rope_type=llama3 → must flow through to caller with
+        // the same field values (no rounding / no zero-init).
+        let arch = larql_models::detect_from_json(&serde_json::json!({
+            "model_type": "llama",
+            "hidden_size": 2048,
+            "num_hidden_layers": 16,
+            "intermediate_size": 8192,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+            "rope_scaling": {
+                "rope_type": "llama3",
+                "factor": 32.0,
+                "low_freq_factor": 1.0,
+                "high_freq_factor": 4.0,
+                "original_max_position_embeddings": 8192,
+            },
+        }));
+        let s = effective_llama3_rope_scaling(&*arch).expect("llama3 scaling exposed");
+        assert_eq!(s.factor, 32.0);
+        assert_eq!(s.low_freq_factor, 1.0);
+        assert_eq!(s.high_freq_factor, 4.0);
+        assert_eq!(s.original_max_position_embeddings, 8192.0);
+    }
+}

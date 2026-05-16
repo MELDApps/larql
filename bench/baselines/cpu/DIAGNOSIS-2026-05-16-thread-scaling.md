@@ -104,17 +104,48 @@ Hypothesised causes (ranked by likely impact):
 
 ## Next experiments
 
-1. **Threads default to 8 on M3 Max** (Task #16). Easy 33% win on a
-   `larql bench --cpu` invocation that doesn't explicitly set
-   `RAYON_NUM_THREADS`.
-2. **`cargo asm` on `q4k_q8k_matvec_neon`** vs llama.cpp's
-   `ggml_vec_dot_q4_K_q8_K`. Compare instruction counts per
-   super-block. Look for missing prefetches, FMA chains, etc.
-3. **Software prefetch hints** via inline asm (`prfm pldl1keep`)
-   inside the inner loop. Probably 5–15% gain if hardware
-   prefetcher is missing strides.
-4. **Hand-tuned inline asm for the inner SDOT loop** — last resort,
-   highest effort. Would match llama.cpp.
+1. **Threads default to 8 on M3 Max** (Task #16) — **landed
+   2026-05-16, 19.4 → 24.5 tok/s.** Gap moved from 2.36× → 1.69×.
+
+2. **Software prefetch hints (`prfm pldl1keep`)** — **tested, null
+   on M3 Max (Task #17).** Per-row and per-super-block hints both
+   net-regressed single-thread throughput. M3's hardware prefetcher
+   already handles the access pattern; software hints compete for
+   L1 fill bandwidth without delivering new data. Kept the
+   `prefetch_l1_keep` helper for future use on harder patterns.
+
+3. **Paired loads (`vld1q_u8_x2`, `vld1q_s8_x2`)** — **landed
+   2026-05-16, marginal.** ~1-3% single-thread gain (5.7 → 5.8
+   tok/s); no measurable t=8 win. Same total bandwidth, single
+   ld1.2d dispatch slot vs two ldr — small ILP win.
+
+4. **Per-group scalar accumulators** — **landed 2026-05-16, null
+   end-to-end.** Splitting `sum1`/`sum2` into per-group arrays so
+   LLVM can interleave SDOTs across groups. Bit-exact, no
+   measurable throughput change — LLVM was likely already doing
+   this re-association internally.
+
+5. **Hand-tuned inline asm for the inner SDOT loop** — still open.
+   The remaining 1.73× per-core gap can't be closed by intrinsic-
+   level tweaks; we've exhausted the easy ones. Requires matching
+   llama.cpp's exact instruction sequence (specific FMA spacing,
+   load issue ordering, per-cycle dispatch shape).
+
+6. **Smaller quant format (Q3_K, Q2_K)** — still open. Would reduce
+   total bytes per step proportionally. Needs new vindex extraction.
+
+## Updated summary
+
+After Task #16 landed: **1.69× behind llama.cpp at t=8 default
+(24.5 tok/s vs 42.5 tok/s)**, was 2.36× at t=12. Per-core ratio
+holds at 1.73× across thread counts.
+
+Remaining 1.73× per-core gap is now confirmed memory-system-level,
+not compute or scheduling level — three independent micro-opts
+on top of the sdot path (prefetch, paired loads, per-group accs)
+delivered ≤3% combined. Single-thread CPU forward is at 11-12 GB/s
+per core vs llama.cpp's ~20 GB/s per core; same hardware, same
+algorithm, same NEON dispatch shape.
 
 ## Summary
 

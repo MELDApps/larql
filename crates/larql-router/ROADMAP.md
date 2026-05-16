@@ -293,6 +293,46 @@ the bench finishes.
 
 ---
 
+### Exp 53 — Rust port of the sharded-vindex shard endpoint ✅ shipped 2026-05-16
+
+**Spec**: `experiments/53_sharded_vindex/{README.md, server.py:67-103}`.
+
+Ported the Python prototype's KNN shard service into Rust. The handler
+mirrors `server.py:knn_lookup` exactly (cosine similarity, tau gate, k=1
+fast path, positive-cosine-weighted top-k average); the wire moves from
+the prototype's bespoke binary TCP frame to tonic/gRPC so shard traffic
+shares the same channel as `GridService.Join` when `--features quic`
+is enabled.
+
+**What shipped:**
+- `larql-router-protocol/proto/shard.proto` — `ShardService.Query`
+  unary RPC. `ShardQuery { layer_id, k, query_vec, tau_override }` →
+  `ShardResult { hit, mlp_out, best_sim }`. `query_vec` / `mlp_out`
+  use raw f32 LE bytes (same wire convention as `ExpertService`)
+  so hidden-sized arrays don't pay proto varint overhead.
+- `larql-server/src/shard_query.rs` — pure helpers (`l2_normalize`,
+  `cosine_similarities`, `weighted_topk_average`, `decode_f32_le`,
+  `encode_f32_le`), `ShardCache` (in-memory `HashMap<u32, LayerEntry>`
+  with `insert_layer` + test-only `seed_from_normed`), and the
+  `ShardGrpcService` tonic impl. All branches unit-tested.
+- `larql-server/src/bootstrap.rs` — opt-in registration: when
+  `--shard-query-tau <TAU>` is passed alongside `--grpc-port`, the
+  server adds `ShardServiceServer` to the existing tonic builder
+  chain (next to `VindexServiceServer` + `ExpertServiceServer`).
+  The cache starts empty; on-disk loaders are explicitly out of
+  scope for this transport-layer port and tracked separately.
+- `larql-server/tests/test_shard_query.rs` — 3 round-trip
+  integration tests over a real TCP socket (hit / miss-below-tau /
+  unknown-layer).
+
+**Caveat:** lifting this effectively promotes "Multi-machine MoE" from
+P2 → P1 per `ROADMAP_STATUS`. The follow-up work is a portable on-disk
+cache format (the Python prototype uses `.pkl`, which is non-portable).
+
+Test counts: **26 shard_query tests** (23 unit + 3 integration).
+
+---
+
 ### Exp 41 — LAN preregistration matrix ✅ shipped 2026-05-15
 
 **Spec**: `experiments/41_residual_transport_grid/{SPEC.md,REPORT.md:508-547}`.
@@ -332,21 +372,7 @@ Smoke-tested with the experiment's `config.example.json` —
 
 ## P1 — Remaining
 
-### Exp 53 — Rust port of the sharded-vindex shard endpoint
-
-**Status:** Ready to lift. Python prototype validated: **0.085 ms loopback
-RTT, 10/10 facts preserved, 0.2% step-budget overhead at 25 tok/s.**
-
-Port `experiments/53_sharded_vindex/server.py:67-103` to a Rust shard
-service inside `larql-server` so the existing GT7 QUIC transport in
-`crates/larql-router-protocol/src/transport/quic.rs` can carry vindex
-shard traffic alongside the existing `Join` stream. The Python protocol
-is the wire-format proof-of-life; this is a transport-layer port, not a
-new ADR. ~1 day.
-
-**Caveat:** `ROADMAP_STATUS` lists "Multi-machine MoE — P2 unless
-re-promoted". Lifting Exp 53 effectively promotes that item to P1. Don't
-pull unless that promotion is wanted.
+_(none — Exp 53 shipped 2026-05-16, see below.)_
 
 ---
 

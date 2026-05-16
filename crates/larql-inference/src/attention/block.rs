@@ -376,8 +376,7 @@ fn run_attention_block_core(
     dump_f32("q_out_after_qk_norm", &q_normed);
 
     // RoPE on Q
-    let layer_rope_base =
-        crate::forward_overrides::effective_rope_base_for_layer(arch, layer);
+    let layer_rope_base = crate::forward_overrides::effective_rope_base_for_layer(arch, layer);
     let rotary_frac = arch.rotary_fraction_for_layer(layer);
     let pos_divisor =
         crate::forward_overrides::effective_rope_position_divisor_for_layer(arch, layer);

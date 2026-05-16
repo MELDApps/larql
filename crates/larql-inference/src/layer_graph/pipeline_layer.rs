@@ -7,9 +7,7 @@
 //! Per-layer override resolution (env vars vs arch defaults) lives in
 //! [`crate::forward_overrides`]; this module consumes those helpers.
 
-use crate::forward_overrides::{
-    effective_rope_base_for_layer, layer_forced_global,
-};
+use crate::forward_overrides::{effective_rope_base_for_layer, layer_forced_global};
 use crate::model::ModelWeights;
 use larql_compute::{
     FullPipelineLayer, MoeLayerWeights, MoeRoutingPolicy, MoeWeightLayout, QuantFormat, QuantWeight,

@@ -31,7 +31,7 @@ async fn spawn_server() -> (std::net::SocketAddr, Arc<RwLock<ShardCache>>) {
             )
             .unwrap();
     }
-    let svc = ShardGrpcService::new(Arc::clone(&cache));
+    let svc = ShardGrpcService::from_cache(Arc::clone(&cache));
     let server_cache = Arc::clone(&cache);
     tokio::spawn(async move {
         Server::builder()

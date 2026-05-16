@@ -1,23 +1,38 @@
 //! Sharded vindex KNN service (Exp 53).
 //!
-//! Hosts a pre-compiled `(input, output)` cache at one or more layers and
-//! serves remote KNN lookups over gRPC. When a query vector hits an
-//! indexed entry (cosine ≥ tau), the server returns the matching MLP
-//! output; otherwise the client falls back to local FFN compute.
+//! Hosts a per-layer `(input, output)` cache and serves remote KNN
+//! lookups over gRPC. When a query vector hits an indexed entry
+//! (cosine ≥ tau), the server returns the matching MLP output;
+//! otherwise the client falls back to local FFN compute.
 //!
-//! Wire surface lives in `larql_router_protocol::shard_proto`; this
-//! module implements the `ShardService` trait + the in-memory cache
-//! it consults. Cache loading from disk is out of scope for the
-//! transport-layer port — operators seed via `ShardCache::insert_layer`
-//! or `ShardCache::seed_from_normed` (used by tests) until a portable
-//! on-disk format is specified in a follow-up ADR.
+//! Two backends share the [`ShardSource`] enum:
+//!
+//! - [`ShardSource::Vindex`] — production. Queries the server's
+//!   loaded [`PatchedVindex`] via `gate_knn` + the `ffn_row_into`
+//!   down accessor. Compiled facts live as vindex patches (added with
+//!   `PatchedVindex::add_patch`) so the cache shares the vindex's
+//!   storage / locking story and there's no separate on-disk format
+//!   to maintain.
+//! - [`ShardSource::Cache`] — test fixture. Tiny in-memory flat
+//!   `Vec<f32>` store; lets unit + integration tests exercise the
+//!   wire path without standing up a full vindex.
+//!
+//! Dispatch is via enum variant — no `async-trait` indirection, no
+//! vtable on the hot path.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use larql_router_protocol::{ShardQuery, ShardResult, ShardService};
+use larql_vindex::ndarray::Array1;
+use larql_vindex::{FfnRowAccess, PatchedVindex};
 use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
+
+/// Component index for the down projection in `FfnRowAccess::ffn_row_into`.
+/// 0 = gate, 1 = up, 2 = down. The shard "output" is the down row of the
+/// matched feature — that's the per-feature contribution to the FFN sum.
+const FFN_COMPONENT_DOWN: usize = 2;
 
 /// Pre-normalized L2 fudge factor matching the Python prototype
 /// (`q / (||q|| + 1e-12)`). Keeps the lookup deterministic on
@@ -309,10 +324,7 @@ fn weighted_topk_average(sims: &[f32], outputs: &[f32], k: usize, d: usize) -> V
             *w /= w_sum;
         }
     } else {
-        let uniform = 1.0 / (k as f32);
-        for w in &mut weights {
-            *w = uniform;
-        }
+        weights.fill(1.0 / (k as f32));
     }
 
     let mut acc = vec![0.0f32; d];
@@ -355,19 +367,157 @@ pub fn encode_f32_le(values: &[f32]) -> Vec<u8> {
     out
 }
 
+// ── ShardSource enum + impls ─────────────────────────────────────────────────
+
+/// Pluggable "where do shard answers come from?" backend.
+///
+/// Two variants:
+///
+/// - [`ShardSource::Vindex`] — production. Queries the server's
+///   loaded [`PatchedVindex`] via `gate_knn` + down-row accessors.
+///   "Compiled facts" live as vindex patches, so the cache shares the
+///   vindex's storage / locking story instead of inventing a new
+///   on-disk format. Concretely: an exp 52 compile step writes
+///   vindex patches; the shard service queries the live patched
+///   vindex at runtime.
+/// - [`ShardSource::Cache`] — test fixture. Tiny in-memory flat
+///   `Vec<f32>` store. Lets unit + integration tests exercise the
+///   wire path without standing up a full vindex.
+///
+/// Enum dispatch avoids the `async-trait` dependency and keeps the
+/// hot-path call free of vtable indirection. The variants stay
+/// closed; if a third backend is ever needed (Redis, S3, …) it
+/// goes here.
+#[derive(Clone)]
+pub enum ShardSource {
+    Cache(Arc<RwLock<ShardCache>>),
+    Vindex(Arc<RwLock<PatchedVindex>>, f32),
+}
+
+impl ShardSource {
+    /// Build a vindex-backed source with the given default tau.
+    pub fn vindex(vindex: Arc<RwLock<PatchedVindex>>, tau: f32) -> Self {
+        Self::Vindex(vindex, tau)
+    }
+
+    /// Build a cache-backed source (test fixture).
+    pub fn cache(cache: Arc<RwLock<ShardCache>>) -> Self {
+        Self::Cache(cache)
+    }
+
+    /// Default tau used when `tau_override == 0.0` on the wire.
+    pub async fn default_tau(&self) -> f32 {
+        match self {
+            ShardSource::Cache(c) => c.read().await.tau(),
+            ShardSource::Vindex(_, tau) => *tau,
+        }
+    }
+
+    /// Look up `query` at `layer_id` with at most `k` neighbours,
+    /// gated by `tau`. Returning `ShardLookup { mlp_out: None }`
+    /// signals a miss — the client falls back to local compute.
+    pub async fn lookup(&self, layer_id: u32, query: &[f32], k: usize, tau: f32) -> ShardLookup {
+        match self {
+            ShardSource::Cache(c) => c.read().await.knn_lookup(layer_id, query, k, tau),
+            ShardSource::Vindex(v, _) => vindex_lookup(v, layer_id, query, k, tau).await,
+        }
+    }
+}
+
+/// Production vindex lookup, factored out so the `ShardSource::lookup`
+/// match arm stays readable. Mirrors `server.py:knn_lookup`: `k == 1`
+/// returns the best down-row; `k > 1` returns the positive-cosine
+/// -weighted average of the top-k down-rows.
+async fn vindex_lookup(
+    vindex: &Arc<RwLock<PatchedVindex>>,
+    layer_id: u32,
+    query: &[f32],
+    k: usize,
+    tau: f32,
+) -> ShardLookup {
+    let guard = vindex.read().await;
+    let layer = layer_id as usize;
+
+    // `gate_knn` scores via dot product against pre-normalized gate
+    // rows, which is cosine for unit-norm storage. Normalize the
+    // query so the score is comparable to the Python prototype's tau.
+    let q_normed = Array1::from(l2_normalize(query));
+    let k_clamped = k.max(1);
+    let hits = guard.gate_knn(layer, &q_normed, k_clamped);
+    if hits.is_empty() {
+        return ShardLookup {
+            mlp_out: None,
+            best_sim: 0.0,
+        };
+    }
+    let best_sim = hits[0].1;
+    if best_sim < tau {
+        return ShardLookup {
+            mlp_out: None,
+            best_sim,
+        };
+    }
+
+    // d is the query/residual width.
+    let d = q_normed.len();
+
+    if k_clamped == 1 {
+        let mut out = vec![0.0f32; d];
+        if !guard.ffn_row_into(layer, FFN_COMPONENT_DOWN, hits[0].0, &mut out) {
+            return ShardLookup {
+                mlp_out: None,
+                best_sim,
+            };
+        }
+        return ShardLookup {
+            mlp_out: Some(out),
+            best_sim,
+        };
+    }
+
+    // k > 1: positive-cosine-weighted average. Matches
+    // `weighted_topk_average` so the cache and vindex paths agree.
+    let mut weights: Vec<f32> = hits.iter().map(|(_, s)| s.max(0.0)).collect();
+    let w_sum: f32 = weights.iter().sum();
+    if w_sum > NORM_EPS {
+        for w in &mut weights {
+            *w /= w_sum;
+        }
+    } else {
+        weights.fill(1.0 / (k_clamped as f32));
+    }
+
+    let mut acc = vec![0.0f32; d];
+    let mut row = vec![0.0f32; d];
+    for ((feat, _), w) in hits.iter().zip(weights.iter()) {
+        if !guard.ffn_row_into(layer, FFN_COMPONENT_DOWN, *feat, &mut row) {
+            return ShardLookup {
+                mlp_out: None,
+                best_sim,
+            };
+        }
+        for j in 0..d {
+            acc[j] += row[j] * *w;
+        }
+    }
+    ShardLookup {
+        mlp_out: Some(acc),
+        best_sim,
+    }
+}
+
 // ── gRPC service ─────────────────────────────────────────────────────────────
 
-/// Tonic service backed by a shared `ShardCache`. The cache lives
-/// behind an `RwLock` so future Insert RPCs can mutate it under a
-/// write lock without touching the read-only query path's contention
-/// profile.
+/// Tonic service that dispatches every `Query` to a [`ShardSource`].
+/// Source-agnostic: production wires a `ShardSource::Vindex`, tests
+/// can use `ShardSource::Cache`.
 pub struct ShardGrpcService {
-    pub cache: Arc<RwLock<ShardCache>>,
+    source: ShardSource,
 }
 
 impl ShardGrpcService {
-    pub fn new(cache: Arc<RwLock<ShardCache>>) -> Self {
-        Self { cache }
+    pub fn new(source: ShardSource) -> Self {
+        Self { source }
     }
 }
 
@@ -377,14 +527,15 @@ impl ShardService for ShardGrpcService {
         let req = request.into_inner();
         let query = decode_f32_le(&req.query_vec)?;
 
-        let guard = self.cache.read().await;
         let tau = if req.tau_override > 0.0 {
             req.tau_override
         } else {
-            guard.tau()
+            self.source.default_tau().await
         };
-        let lookup = guard.knn_lookup(req.layer_id, &query, req.k as usize, tau);
-        drop(guard);
+        let lookup = self
+            .source
+            .lookup(req.layer_id, &query, req.k as usize, tau)
+            .await;
 
         let (hit, mlp_bytes) = match lookup.mlp_out {
             Some(out) => (true, encode_f32_le(&out)),
@@ -398,6 +549,22 @@ impl ShardService for ShardGrpcService {
     }
 }
 
+// ── Convenience constructors for tests + bootstrap ─────────────────────────────
+
+impl ShardGrpcService {
+    /// Build a cache-backed service. Used by tests and the v1
+    /// "cache-only" deployment that doesn't yet wire vindex patches.
+    pub fn from_cache(cache: Arc<RwLock<ShardCache>>) -> Self {
+        Self::new(ShardSource::cache(cache))
+    }
+
+    /// Build a vindex-backed service over the server's loaded
+    /// `PatchedVindex`. Production path.
+    pub fn from_vindex(vindex: Arc<RwLock<PatchedVindex>>, tau: f32) -> Self {
+        Self::new(ShardSource::vindex(vindex, tau))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,7 +573,7 @@ mod tests {
 
     #[test]
     fn encode_decode_f32_le_round_trips() {
-        let values = vec![1.0, -2.5, 0.0, 3.1415927];
+        let values = vec![1.0_f32, -2.5, 0.0, 4.25];
         let bytes = encode_f32_le(&values);
         assert_eq!(bytes.len(), values.len() * 4);
         let back = decode_f32_le(&bytes).unwrap();
@@ -630,7 +797,7 @@ mod tests {
     #[tokio::test]
     async fn grpc_query_returns_hit_on_matching_vector() {
         let cache = Arc::new(RwLock::new(cache_with_two_entries(4, 0.97)));
-        let svc = ShardGrpcService::new(cache);
+        let svc = ShardGrpcService::from_cache(cache);
         let req = Request::new(ShardQuery {
             layer_id: 26,
             k: 1,
@@ -647,7 +814,7 @@ mod tests {
     #[tokio::test]
     async fn grpc_query_returns_miss_when_below_tau() {
         let cache = Arc::new(RwLock::new(cache_with_two_entries(4, 0.97)));
-        let svc = ShardGrpcService::new(cache);
+        let svc = ShardGrpcService::from_cache(cache);
         let req = Request::new(ShardQuery {
             layer_id: 26,
             k: 1,
@@ -663,7 +830,7 @@ mod tests {
     #[tokio::test]
     async fn grpc_tau_override_takes_precedence() {
         let cache = Arc::new(RwLock::new(cache_with_two_entries(4, 0.5)));
-        let svc = ShardGrpcService::new(cache);
+        let svc = ShardGrpcService::from_cache(cache);
         // Query [1, 1, 0, 0] hits at cos = 0.7071. tau_override = 0.99 → miss.
         let req = Request::new(ShardQuery {
             layer_id: 26,
@@ -678,7 +845,7 @@ mod tests {
     #[tokio::test]
     async fn grpc_rejects_malformed_query_bytes() {
         let cache = Arc::new(RwLock::new(ShardCache::new(0.97)));
-        let svc = ShardGrpcService::new(cache);
+        let svc = ShardGrpcService::from_cache(cache);
         let req = Request::new(ShardQuery {
             layer_id: 0,
             k: 1,
@@ -687,5 +854,50 @@ mod tests {
         });
         let err = svc.query(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    // ── Vindex source ────────────────────────────────────────────────────────
+
+    /// Smoke-test the vindex enum variant. Constructs an empty
+    /// `PatchedVindex` (no gate / down weights loaded) so every
+    /// `gate_knn` returns `[]` and the source reports a clean miss
+    /// without panicking. End-to-end FFN-row lookups need a fully
+    /// loaded vindex which is exercised by the production deploy and
+    /// `larql-server`'s integration tests against real models.
+    #[tokio::test]
+    async fn vindex_source_returns_miss_when_index_is_empty() {
+        use larql_vindex::PatchedVindex;
+        let base = larql_vindex::VectorIndex::new(
+            vec![None, None, None], // 3 layers, no gate vectors
+            vec![None, None, None], // no down_meta
+            3,
+            8, // hidden_size — must match query length
+        );
+        let patched = Arc::new(RwLock::new(PatchedVindex::new(base)));
+        let source = ShardSource::vindex(patched, 0.97);
+        let lookup = source.lookup(0, &[0.0f32; 8], 1, 0.97).await;
+        assert!(lookup.mlp_out.is_none(), "empty vindex must miss");
+        assert_eq!(lookup.best_sim, 0.0);
+    }
+
+    #[tokio::test]
+    async fn vindex_source_default_tau_is_constructor_arg() {
+        use larql_vindex::PatchedVindex;
+        let base = larql_vindex::VectorIndex::new(vec![None], vec![None], 1, 4);
+        let patched = Arc::new(RwLock::new(PatchedVindex::new(base)));
+        let source = ShardSource::vindex(patched, 0.42);
+        assert!((source.default_tau().await - 0.42).abs() < 1e-6);
+    }
+
+    #[test]
+    fn shard_source_constructors_are_callable() {
+        let cache = Arc::new(RwLock::new(ShardCache::new(0.5)));
+        // Just confirm both constructors compile and the variants
+        // round-trip — pattern matching on the enum keeps the variants
+        // honest if someone re-orders them later.
+        match ShardSource::cache(Arc::clone(&cache)) {
+            ShardSource::Cache(_) => {}
+            ShardSource::Vindex(_, _) => panic!("expected Cache"),
+        }
     }
 }

@@ -1,6 +1,6 @@
 # larql-router-protocol
 
-Generated tonic/prost types for the two gRPC services that wire
+Generated tonic/prost types for the three gRPC services that wire
 `larql-router` together with `larql-server` shards, plus a thin QUIC
 transport wrapper that the router and server share when
 `--features quic` is enabled.
@@ -8,7 +8,7 @@ transport wrapper that the router and server share when
 This crate is intentionally narrow — it holds the proto contracts and
 nothing else. The router orchestration (route table, rebalancer,
 admin endpoints) lives in `crates/larql-router`; the server-side
-announce client lives in `crates/larql-server`.
+announce client + KNN shard cache live in `crates/larql-server`.
 
 ## Crate layout
 
@@ -16,6 +16,7 @@ announce client lives in `crates/larql-server`.
 proto/
     grid.proto      ← GridService — self-assembling grid lifecycle
     expert.proto    ← ExpertService — MoE expert dispatch over gRPC
+    shard.proto     ← ShardService — sharded vindex KNN cache (Exp 53)
 src/
     lib.rs          ← re-exports tonic::include_proto! generated code
     transport/
@@ -100,6 +101,32 @@ dispatch MoE experts to the owning shard. Two RPCs:
 Both encode hidden vectors as raw little-endian `f32` bytes (length
 = `hidden × 4`) rather than `repeated float` to dodge proto varint
 overhead.
+
+## ShardService
+
+Sharded vindex KNN cache (Exp 53). A `larql-server` can host a
+pre-compiled `(input, output)` cache at one or more layers and
+answer remote KNN queries — clients running their own forward pass
+replace one FFN layer's compute with a single unary RPC. On a hit
+(cosine ≥ tau) the server returns the matching MLP output; on a
+miss the client falls back to local FFN.
+
+| RPC | Input | Output |
+|-----|-------|--------|
+| `Query` | `ShardQuery { layer_id, k, query_vec, tau_override }` | `ShardResult { hit, mlp_out, best_sim }` |
+
+`query_vec` and `mlp_out` use the same raw f32 LE byte convention
+as `ExpertService`. `tau_override = 0.0` means "use the
+server-configured tau"; a positive value forces that threshold for
+the call. `best_sim` is reported on hit *and* miss for telemetry /
+threshold tuning.
+
+The server side lives in `crates/larql-server/src/shard_query.rs`
+(handler + `ShardCache`) and is registered when
+`larql-server --grpc-port <P> --shard-query-tau <TAU>` are both set.
+Cache loading from disk is intentionally out of scope here —
+operators seed via in-process helpers until a portable on-disk
+format is specified in a follow-up ADR.
 
 ## QUIC transport (opt-in)
 

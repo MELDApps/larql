@@ -96,10 +96,12 @@ Legacy aliases for `standard`: `full`, `fp32`. Legacy aliases for
 windowed standard: `markov-bounded`, `bounded`, `sliding`. Legacy aliases
 for `no-cache`: `none`, `off`.
 
-All engines are reachable via `larql bench <model> --engine <spec>`. As
-of the unification migration, `larql run` / `larql walk` / `larql-server`
-will also accept `--engine` (currently behind `LARQL_KV_ENGINE_DISPATCH=1`
-for parity-testing; see the unification spec for the rollout plan).
+All engines are reachable via `larql bench <model> --engine <spec>`.
+`larql run` and `larql walk` route through `KvEngine` dispatch by
+default — the legacy `--kv-cache standard|markov-bounded|none` flag now
+resolves to `Standard { window_size }` / `NoCache` engines transparently
+(spec §6.1 mapping table). A `larql run --engine` / `LARQL_KV_ENGINE`
+surface and server wiring land in step 6 of the unification migration.
 
 ## Crate layout
 

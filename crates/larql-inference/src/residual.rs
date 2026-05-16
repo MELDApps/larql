@@ -313,4 +313,101 @@ mod tests {
             );
         }
     }
+
+    // ── rms_norm_for_arch / layer_norm_for_arch eps wiring ───────────────────
+    //
+    // The default `rms_norm` (legacy) uses DEFAULT_EPS = 1e-6. The
+    // arch-aware variants must read `arch.norm_eps()`. These are the
+    // unit-level gates for bug 2 in
+    // docs/diagnoses/shannon-cross-engine-divergence.md.
+
+    fn build_arch_with_eps(eps: f64) -> Box<dyn larql_models::ModelArchitecture> {
+        larql_models::detect_from_json(&serde_json::json!({
+            "model_type": "llama",
+            "hidden_size": 8,
+            "num_hidden_layers": 2,
+            "intermediate_size": 32,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "rms_norm_eps": eps,
+        }))
+    }
+
+    #[test]
+    fn rms_norm_for_arch_reads_arch_eps_not_default() {
+        // Construct a residual where the squared mean is small enough that
+        // 1e-6 vs 1e-5 changes the rsqrt term measurably (>1e-4 ULP), so
+        // the two eps values produce visibly different outputs.
+        let x = Array2::from_shape_vec((1, 4), vec![0.001_f32, 0.001, 0.001, 0.001]).unwrap();
+        let arch_strict = build_arch_with_eps(1e-6);
+        let arch_loose = build_arch_with_eps(1e-5);
+        let out_strict = rms_norm_for_arch(&x, None, 0.0, &*arch_strict);
+        let out_loose = rms_norm_for_arch(&x, None, 0.0, &*arch_loose);
+        let max_diff = out_strict
+            .iter()
+            .zip(out_loose.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_diff > 0.01,
+            "arch.norm_eps() not honoured: outputs match with eps 1e-6 vs 1e-5 (max diff {max_diff})"
+        );
+    }
+
+    #[test]
+    fn rms_norm_for_arch_falls_back_to_default_when_arch_omits_eps() {
+        // Build an arch without rms_norm_eps so arch.norm_eps() returns
+        // the trait default (DEFAULT_NORM_EPS = 1e-6). Result should match
+        // bare rms_norm exactly.
+        let arch = larql_models::detect_from_json(&serde_json::json!({
+            "model_type": "llama",
+            "hidden_size": 8,
+            "num_hidden_layers": 2,
+            "intermediate_size": 32,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+        }));
+        let x = Array2::from_shape_vec((1, 4), vec![1.0_f32, 2.0, 3.0, 4.0]).unwrap();
+        let out_arch = rms_norm_for_arch(&x, None, 0.0, &*arch);
+        let out_default = rms_norm(&x, None, 0.0);
+        for (a, d) in out_arch.iter().zip(out_default.iter()) {
+            assert!(
+                (a - d).abs() < 1e-7,
+                "arch.norm_eps() fallback must equal DEFAULT_EPS path"
+            );
+        }
+    }
+
+    #[test]
+    fn layer_norm_for_arch_reads_arch_eps_not_default() {
+        let x = Array2::from_shape_vec((1, 4), vec![0.001_f32, 0.001, 0.001, 0.001]).unwrap();
+        let arch_strict = build_arch_with_eps(1e-6);
+        let arch_loose = build_arch_with_eps(1e-5);
+        let out_strict = layer_norm_for_arch(&x, None, None, &*arch_strict);
+        let out_loose = layer_norm_for_arch(&x, None, None, &*arch_loose);
+        let max_diff = out_strict
+            .iter()
+            .zip(out_loose.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        // LayerNorm subtracts mean first; for a uniform vector the
+        // numerator is 0 and the output is determined entirely by eps
+        // through the variance term. Either eps produces 0/sqrt(eps) = 0
+        // for both, so this case is degenerate. Use a non-uniform vector
+        // to exercise the eps difference.
+        if max_diff <= 1e-6 {
+            let x2 = Array2::from_shape_vec((1, 4), vec![0.001_f32, 0.002, 0.003, 0.004]).unwrap();
+            let s = layer_norm_for_arch(&x2, None, None, &*arch_strict);
+            let l = layer_norm_for_arch(&x2, None, None, &*arch_loose);
+            let d = s
+                .iter()
+                .zip(l.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                d > 1e-5,
+                "layer_norm_for_arch did not honour arch.norm_eps()"
+            );
+        }
+    }
 }
