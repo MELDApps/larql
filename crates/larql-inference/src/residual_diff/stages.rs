@@ -660,4 +660,169 @@ mod tests {
         );
         assert!(r.is_clean());
     }
+
+    // ── stage_stat pure-function tests ────────────────────────────────
+
+    #[test]
+    fn stage_stat_mismatched_lengths_marks_infinite_max_abs() {
+        // L429-437: length mismatch returns a sentinel `max_abs=inf` so
+        // any threshold-based comparison treats the pair as bad.
+        let s = stage_stat(7, &[1.0, 2.0, 3.0], &[1.0, 2.0]);
+        assert_eq!(s.layer, 7);
+        assert_eq!(s.cos, 0.0);
+        assert!(s.max_abs.is_infinite());
+        assert_eq!(s.a_norm, 0.0);
+        assert_eq!(s.b_norm, 0.0);
+    }
+
+    #[test]
+    fn stage_stat_identical_vectors_have_cosine_one() {
+        let v: Vec<f32> = vec![3.0, 4.0, 0.0];
+        let s = stage_stat(0, &v, &v);
+        assert!((s.cos - 1.0).abs() < 1e-6, "cos={}", s.cos);
+        assert_eq!(s.max_abs, 0.0);
+        // ‖v‖ = 5.
+        assert!((s.a_norm - 5.0).abs() < 1e-6);
+        assert!((s.b_norm - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stage_stat_zero_norm_vectors_have_zero_cosine() {
+        // a_sq or b_sq == 0 → cosine = 0 (no division by zero).
+        let zero = vec![0.0f32; 4];
+        let nonzero = vec![1.0f32, 2.0, 3.0, 4.0];
+        let s = stage_stat(0, &zero, &nonzero);
+        assert_eq!(s.cos, 0.0);
+        assert_eq!(s.a_norm, 0.0);
+        assert!(s.b_norm > 0.0);
+        let s2 = stage_stat(0, &nonzero, &zero);
+        assert_eq!(s2.cos, 0.0);
+    }
+
+    #[test]
+    fn stage_stat_tracks_pointwise_max_abs_diff() {
+        let a = vec![1.0f32, 2.0, 3.0];
+        let b = vec![1.0f32, 2.0, 0.5];
+        // The pointwise diffs are 0, 0, 2.5 → max_abs = 2.5.
+        let s = stage_stat(0, &a, &b);
+        assert!((s.max_abs - 2.5).abs() < 1e-6, "max_abs={}", s.max_abs);
+    }
+
+    // ── read_stage_dir / read_f32_vec filesystem tests ────────────────
+
+    fn write_f32_file(path: &std::path::Path, vals: &[f32]) {
+        let mut bytes = Vec::with_capacity(vals.len() * 4);
+        for v in vals {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        std::fs::write(path, &bytes).unwrap();
+    }
+
+    #[test]
+    fn read_f32_vec_round_trips_little_endian_floats() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.f32");
+        let vals: Vec<f32> = vec![1.0, -2.5, 3.75, 0.0];
+        write_f32_file(&path, &vals);
+        let got = read_f32_vec(&path).expect("read");
+        assert_eq!(got, vals);
+    }
+
+    #[test]
+    fn read_f32_vec_returns_none_on_byte_count_not_multiple_of_four() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.f32");
+        std::fs::write(&path, [0u8, 1, 2]).unwrap();
+        assert!(read_f32_vec(&path).is_none());
+    }
+
+    #[test]
+    fn read_f32_vec_returns_none_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_f32_vec(&dir.path().join("nope.f32")).is_none());
+    }
+
+    #[test]
+    fn read_stage_dir_picks_up_prefixed_f32_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // Files we want picked up.
+        write_f32_file(&dir.path().join("cpu_L03_q_out.f32"), &[1.0, 2.0]);
+        write_f32_file(&dir.path().join("cpu_L03_k_out.f32"), &[3.0]);
+        // Files that should be skipped: wrong prefix, missing .f32 suffix.
+        write_f32_file(&dir.path().join("metal_L03_q_out.f32"), &[9.0]);
+        std::fs::write(dir.path().join("cpu_L03_readme.txt"), b"skip").unwrap();
+        let got = read_stage_dir(dir.path(), "cpu_L03_").unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got.get("q_out"), Some(&vec![1.0, 2.0]));
+        assert_eq!(got.get("k_out"), Some(&vec![3.0]));
+    }
+
+    #[test]
+    fn read_stage_dir_empty_dir_returns_empty_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let got = read_stage_dir(dir.path(), "anything_").unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn read_stage_dir_errors_when_dir_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no_such_subdir");
+        let err = read_stage_dir(&missing, "p_").unwrap_err();
+        assert!(
+            err.contains("read_dir"),
+            "expected read_dir error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_stage_dir_errors_when_truncated_f32_file_present() {
+        // A correctly-named file with a non-multiple-of-4 byte count
+        // hits the L514 `return Err(...)` branch.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("p_truncated.f32"), [1u8, 2, 3]).unwrap();
+        let err = read_stage_dir(dir.path(), "p_").unwrap_err();
+        assert!(err.contains("could not read f32 file"), "got: {err}");
+    }
+
+    // ── run_with_two_env_vars test ────────────────────────────────────
+
+    #[test]
+    fn run_with_two_env_vars_sets_and_restores_env() {
+        // Use unique var names to avoid clashing with other tests.
+        const D: &str = "LARQL_TEST_DIR_VAR_RW2EV";
+        const L: &str = "LARQL_TEST_LAYER_VAR_RW2EV";
+        // Capture prior state so a parallel test setting these doesn't
+        // confuse our restore-check.
+        let prior_d = std::env::var(D).ok();
+        let prior_l = std::env::var(L).ok();
+        std::env::remove_var(D);
+        std::env::set_var(L, "preexisting");
+
+        let observed_dir = std::cell::Cell::new(String::new());
+        let observed_layer = std::cell::Cell::new(String::new());
+        let dir = run_with_two_env_vars(D, L, "42", || {
+            observed_dir.set(std::env::var(D).unwrap_or_default());
+            observed_layer.set(std::env::var(L).unwrap_or_default());
+        })
+        .expect("tempdir + run ok");
+        // While the closure ran the env vars were set to the tempdir +
+        // layer string.
+        assert_eq!(observed_dir.into_inner(), dir.path().to_string_lossy());
+        assert_eq!(observed_layer.into_inner(), "42");
+        // After the closure the env vars are restored: D was unset →
+        // remove; L was "preexisting" → restored to that.
+        assert!(std::env::var(D).is_err());
+        assert_eq!(std::env::var(L).unwrap_or_default(), "preexisting");
+
+        // Restore the caller's prior state.
+        match prior_d {
+            Some(v) => std::env::set_var(D, v),
+            None => std::env::remove_var(D),
+        }
+        match prior_l {
+            Some(v) => std::env::set_var(L, v),
+            None => std::env::remove_var(L),
+        }
+    }
 }

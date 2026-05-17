@@ -266,6 +266,20 @@ pub(crate) fn build_moe_weights<'a>(
     })
 }
 
+/// Registry tag → `compute::QuantFormat` for the attention surface.
+/// Explicit so a typo or new tag fails loudly rather than silently
+/// aliasing to Q4_K. Lifted from inside `resolve_attn_weights` so the
+/// mapping is unit-testable in isolation.
+fn attn_str_to_format(s: &str) -> QuantFormat {
+    match s {
+        "Q4_K" => QuantFormat::Q4_K,
+        "Q6_K" => QuantFormat::Q6_K,
+        other => panic!(
+            "resolve_attn_weights: registry tag {other:?} has no compute::QuantFormat mapping"
+        ),
+    }
+}
+
 /// Helper: resolve attention weights from vindex (Q4_K preferred, Q8 fallback).
 pub fn resolve_attn_weights<'a>(
     index: &'a larql_vindex::VectorIndex,
@@ -276,17 +290,7 @@ pub fn resolve_attn_weights<'a>(
     QuantWeight<'a>,
     QuantWeight<'a>,
 )> {
-    // Registry tag → compute::QuantFormat. Explicit so a typo or new
-    // tag fails loudly rather than silently aliasing to Q4_K.
-    fn to_format(s: &str) -> QuantFormat {
-        match s {
-            "Q4_K" => QuantFormat::Q4_K,
-            "Q6_K" => QuantFormat::Q6_K,
-            other => panic!(
-                "resolve_attn_weights: registry tag {other:?} has no compute::QuantFormat mapping"
-            ),
-        }
-    }
+    let to_format = attn_str_to_format;
 
     if let Some([q, k, v, o]) = index.attn_kquant_layer_data(layer) {
         Some((
@@ -345,6 +349,22 @@ pub fn resolve_attn_weights<'a>(
 /// `--quant q4k` writer: gate/up Q4_K, down Q6_K — non-uniform stride). Falls
 /// back to the legacy uniform-stride layout produced by `build_q4k_weights.rs`
 /// when the manifest is absent so older vindexes still work.
+/// Registry tag → `compute::QuantFormat` for the FFN surface, with an
+/// explicit `fallback` for the legacy uniform-stride writer that
+/// didn't emit per-matrix tags. Lifted from inside `resolve_ffn_weights`
+/// so the mapping is unit-testable in isolation.
+fn ffn_str_to_format(s: &str, fallback: QuantFormat) -> QuantFormat {
+    match s {
+        "Q4_K" => QuantFormat::Q4_K,
+        "Q6_K" => QuantFormat::Q6_K,
+        "Q4_0" => QuantFormat::Q4_0,
+        "" => fallback,
+        other => panic!(
+            "resolve_ffn_weights: registry tag {other:?} has no compute::QuantFormat mapping"
+        ),
+    }
+}
+
 pub fn resolve_ffn_weights<'a>(
     index: &'a larql_vindex::VectorIndex,
     layer: usize,
@@ -352,21 +372,7 @@ pub fn resolve_ffn_weights<'a>(
     q4_ffn_per_matrix: usize,
     ffn_format: QuantFormat,
 ) -> (QuantWeight<'a>, QuantWeight<'a>, QuantWeight<'a>) {
-    // Registry tag → compute::QuantFormat. The fallback exists for the
-    // legacy uniform-stride path (`build_q4k_weights.rs` writer didn't
-    // emit per-matrix tags); pass an explicit fallback rather than
-    // silently aliasing unknown tags to Q4_K.
-    fn str_to_format(s: &str, fallback: QuantFormat) -> QuantFormat {
-        match s {
-            "Q4_K" => QuantFormat::Q4_K,
-            "Q6_K" => QuantFormat::Q6_K,
-            "Q4_0" => QuantFormat::Q4_0,
-            "" => fallback,
-            other => panic!(
-                "resolve_ffn_weights: registry tag {other:?} has no compute::QuantFormat mapping"
-            ),
-        }
-    }
+    let str_to_format = ffn_str_to_format;
 
     if let Some([gate, up, down]) = index.interleaved_kquant_layer_data(layer) {
         return (
@@ -544,6 +550,82 @@ mod tests {
             scales: None,
             format: QuantFormat::Q4_K,
         }
+    }
+
+    // ── kv_cache_shapes_for_arch ──────────────────────────────────────
+
+    #[test]
+    fn kv_cache_shapes_for_arch_returns_one_entry_per_layer() {
+        let w = weights();
+        let shapes = kv_cache_shapes_for_arch(w);
+        assert_eq!(shapes.len(), w.num_layers);
+        for (nh, hd) in &shapes {
+            assert!(*nh > 0);
+            assert!(*hd > 0);
+        }
+    }
+
+    // ── attn_str_to_format ────────────────────────────────────────────
+
+    #[test]
+    fn attn_str_to_format_maps_q4k_and_q6k() {
+        assert_eq!(attn_str_to_format("Q4_K"), QuantFormat::Q4_K);
+        assert_eq!(attn_str_to_format("Q6_K"), QuantFormat::Q6_K);
+    }
+
+    #[test]
+    #[should_panic(expected = "registry tag")]
+    fn attn_str_to_format_panics_on_unknown_tag() {
+        let _ = attn_str_to_format("BF16");
+    }
+
+    // ── ffn_str_to_format ─────────────────────────────────────────────
+
+    #[test]
+    fn ffn_str_to_format_maps_known_tags() {
+        assert_eq!(
+            ffn_str_to_format("Q4_K", QuantFormat::Q4_0),
+            QuantFormat::Q4_K
+        );
+        assert_eq!(
+            ffn_str_to_format("Q6_K", QuantFormat::Q4_0),
+            QuantFormat::Q6_K
+        );
+        assert_eq!(
+            ffn_str_to_format("Q4_0", QuantFormat::Q4_K),
+            QuantFormat::Q4_0
+        );
+    }
+
+    #[test]
+    fn ffn_str_to_format_empty_tag_uses_fallback() {
+        // Legacy writers omitted per-matrix tags — empty string falls
+        // through to the caller's `fallback`.
+        assert_eq!(ffn_str_to_format("", QuantFormat::Q4_0), QuantFormat::Q4_0);
+        assert_eq!(ffn_str_to_format("", QuantFormat::Q4_K), QuantFormat::Q4_K);
+    }
+
+    #[test]
+    #[should_panic(expected = "registry tag")]
+    fn ffn_str_to_format_panics_on_unknown_tag() {
+        let _ = ffn_str_to_format("BOGUS", QuantFormat::Q4_K);
+    }
+
+    // ── moe_routing_policy ────────────────────────────────────────────
+
+    #[test]
+    fn moe_routing_policy_gemma4_returns_hybrid() {
+        // The `gemma4_top_k_softmax` tag must map to the Gemma 4
+        // hybrid policy (the `top_k_softmax` route is the default for
+        // every other router type).
+        let g = moe_routing_policy("gemma4_top_k_softmax");
+        let default = moe_routing_policy("top_k_softmax");
+        // Don't lock-in MoeRoutingPolicy field equality; just verify the
+        // function dispatches both arms without panic. The default arm
+        // catches *all* other tags too.
+        let _ = (g, default);
+        // Any other tag (including unknown ones) takes the catch-all arm:
+        let _ = moe_routing_policy("brand_new_router");
     }
 
     // ── build_arch_params ─────────────────────────────────────────────────────

@@ -6,6 +6,71 @@ The format follows the conventions of [Keep a Changelog](https://keepachangelog.
 with dated entries (`YYYY-MM-DD`) instead of semantic versions during the
 pre-1.0 phase. Forward-looking work lives in [`ROADMAP.md`](ROADMAP.md).
 
+## [2026-05-17] — Q4K synthetic vindex fixture; completions un-excluded
+
+Built the Q4K fixture I'd named as the gate for chat / completions /
+stream coverage in the prior session-close note. Generation paths
+now exercise real Q4K storage without panicking on `attn Q4K slices
+missing for layer N`.
+
+### Added
+
+- **`tests/common/synthetic_q4k_vindex.rs`** — `build()` produces a
+  full Q4K vindex on disk by (a) writing a tiny Llama-shaped
+  safetensors model to a tempdir, (b) running it through
+  `larql_vindex::build_vindex_streaming` with
+  `QuantFormat::Q4K`. Mirrors the gold-standard pattern from
+  `larql-vindex/tests/test_vindex_to_q4k.rs::q4k_end_to_end_from_synthetic_safetensors`.
+  Dims: hidden=8, intermediate=4, num_layers=2, vocab=16 — small
+  enough that each tensor pads to exactly one 256-element Q4_K
+  super-block.
+- **`tests/common/mod.rs::model_with_q4k_weights()`** — returns
+  `(Arc<LoadedModel>, SyntheticQ4kVindex)`. Mirrors production
+  `bootstrap.rs:238-256`: calls `VectorIndex::load_attn_q4k` +
+  `VectorIndex::load_interleaved_q4k` explicitly after the base
+  `load_vindex` so the Q4K data is actually attached to the index
+  (without those calls, `insert_q4k_layer_tensors` still panics
+  even though the on-disk files exist). The fixture's tokenizer is
+  overridden to a 12-entry WordLevel — the streaming pipeline
+  defaults to an empty BPE, which would encode every prompt to 0
+  tokens and short-circuit the generation loop.
+- **`tests/test_synthetic_q4k_smoke.rs`** — 3 tests: file-layout
+  inventory, `get_or_load_weights` succeeds, `insert_q4k_layer_tensors`
+  returns Ok. The third was the actual gate from the prior session.
+- **`tests/test_openai_chat_coverage.rs`** — 11 tests covering the
+  chat endpoint against the Q4K fixture: basic non-streaming and
+  streaming, system message → template rendering, empty messages
+  400, n>1 400, invalid JSON 400, sampling params, stop strings,
+  `response_format: json_object`, tools, and multi-model dispatch.
+  (Not yet measured at time of writing — handed off to a parallel
+  session.)
+- **`safetensors = "0.7"`** added as a larql-server dev-dependency
+  (mirrors the version pinned by larql-vindex).
+
+### Changed
+
+- **`tests/test_openai_completions_coverage.rs`** swapped to use
+  `model_with_q4k_weights` instead of `model_with_real_weights`.
+  Drains the streaming SSE body fully (was capped at 64 KiB) and
+  asserts on the `[DONE]` terminator.
+- **`coverage-policy.json`** — `routes/openai/completions.rs`
+  removed from `exclude_globs` and added at debt baseline 86%
+  (was 40% pre-session, lifted to 86.85% via the Q4K backing +
+  streaming-drain + stop-string tests). The remaining ~13% is the
+  per-token streaming callback body — the synthetic Q4K generator
+  returns 0 tokens with max_tokens=2 so the callback is never
+  invoked.
+
+### Known follow-up
+
+- **Per-token streaming callback path stays uncovered.** The Q4K
+  fixture's generator produces 0 tokens given the synthetic weights
+  (the diagonal-ramp weights produce all-`-inf` logits after rope +
+  Q4K dequant). Hitting the per-token callback body would need
+  either a longer `max_tokens` budget or tuning the weights so the
+  logits aren't degenerate. Tracked as a finer-grained follow-up,
+  not blocking.
+
 ## [2026-05-17] — Coverage push session close: 75% total, 37 files at default 90%
 
 Closing pass after the chat/completions/stream fixture wall was
