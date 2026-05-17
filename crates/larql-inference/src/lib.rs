@@ -143,8 +143,8 @@ pub fn default_async_engine_backend() -> Box<dyn AsyncComputeBackend> {
 /// This factory restores the convenience for callers that want a
 /// runtime-detected GPU backend without `#[cfg(feature = "metal")]`
 /// gating in every call site — `larql bench --backends metal` uses it,
-/// engines that want a compute backend for `q4k_prefill_metal` /
-/// `q4k_decode_token` use it.
+/// engines that want a compute backend for `fused_prefill` /
+/// `fused_decode_step` use it.
 pub fn default_compute_backend() -> Box<dyn larql_compute::ComputeBackend> {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     {

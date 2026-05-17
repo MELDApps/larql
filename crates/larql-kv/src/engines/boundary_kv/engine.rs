@@ -330,7 +330,7 @@ impl KvEngine for BoundaryKvEngine {
         self.inner.cold_bytes()
     }
 
-    fn prefill_q4k(
+    fn prefill_quant(
         &mut self,
         weights: &mut ModelWeights,
         ffn: &dyn FfnBackend,
@@ -340,7 +340,7 @@ impl KvEngine for BoundaryKvEngine {
     ) -> Option<Array2<f32>> {
         let hidden = self
             .inner
-            .prefill_q4k(weights, ffn, index, token_ids, backend)?;
+            .prefill_quant(weights, ffn, index, token_ids, backend)?;
         self.abs_position = token_ids.len();
         if self.maybe_emit_frame(weights, &hidden).is_err() {
             return None;
@@ -348,7 +348,7 @@ impl KvEngine for BoundaryKvEngine {
         Some(hidden)
     }
 
-    fn decode_step_q4k(
+    fn decode_step_quant(
         &mut self,
         weights: &mut ModelWeights,
         ffn: &dyn FfnBackend,
@@ -358,7 +358,7 @@ impl KvEngine for BoundaryKvEngine {
     ) -> Option<Array2<f32>> {
         let hidden = self
             .inner
-            .decode_step_q4k(weights, ffn, index, token_id, backend)?;
+            .decode_step_quant(weights, ffn, index, token_id, backend)?;
         self.abs_position += 1;
         if self.maybe_emit_frame(weights, &hidden).is_err() {
             return None;
@@ -838,7 +838,7 @@ mod tests {
 
     // ── Q4K paths ──
     //
-    // `prefill_q4k` / `decode_step_q4k` delegate to `StandardEngine`, whose
+    // `prefill_quant` / `decode_step_quant` delegate to `StandardEngine`, whose
     // CPU fallback uses `ensure_attn_tensors_dequantised`. The synthetic
     // `make_test_vindex` fixture doesn't carry Q4K attn slices, so the CPU
     // fallback panics — these paths are Metal-only end-to-end. The

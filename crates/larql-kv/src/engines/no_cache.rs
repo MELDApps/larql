@@ -93,7 +93,7 @@ impl KvEngine for NoCacheEngine {
         Some(hidden)
     }
 
-    fn prefill_q4k(
+    fn prefill_quant(
         &mut self,
         weights: &mut ModelWeights,
         _ffn: &dyn FfnBackend,
@@ -116,7 +116,7 @@ impl KvEngine for NoCacheEngine {
         self.prefill(weights, &walk_ffn, token_ids)
     }
 
-    fn decode_step_q4k(
+    fn decode_step_quant(
         &mut self,
         weights: &mut ModelWeights,
         _ffn: &dyn FfnBackend,

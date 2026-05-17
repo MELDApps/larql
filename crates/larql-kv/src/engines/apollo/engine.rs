@@ -401,7 +401,7 @@ impl KvEngine for ApolloEngine {
         Some(raw.h_pre_norm.slice(s![last..=last, ..]).to_owned())
     }
 
-    fn prefill_q4k(
+    fn prefill_quant(
         &mut self,
         weights: &mut ModelWeights,
         _ffn: &dyn FfnBackend,
@@ -419,7 +419,7 @@ impl KvEngine for ApolloEngine {
         self.prefill(weights, _ffn, token_ids)
     }
 
-    fn decode_step_q4k(
+    fn decode_step_quant(
         &mut self,
         weights: &mut ModelWeights,
         _ffn: &dyn FfnBackend,

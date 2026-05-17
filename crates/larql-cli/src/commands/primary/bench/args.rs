@@ -35,19 +35,28 @@ pub struct BenchArgs {
     #[arg(long, value_name = "MODEL")]
     pub ollama: Option<String>,
 
-    /// Comma-separated KV engines to bench alongside the GPU path.
+    /// KV engines to bench alongside the GPU path.
     ///
     /// Supported engine specs (same syntax as `EngineKind::from_name`):
-    ///   standard                       — production K/V cache (default)
-    ///   standard:window=N              — sliding-window K/V
-    ///   no-cache                       — full re-forward per step (O(N²)); debug
-    ///   markov-rs[:window=N]           — residual-stream replacement
-    ///   unlimited-context:window=N     — per-window K/V checkpoints
-    ///   turbo-quant[:bits=3|4]         — WHT + Lloyd-Max codec; experimental
-    ///   apollo:layer=N,coef=F,top_k=K  — boundary-residual injection; experimental
+    ///   standard                              — production K/V cache (default)
+    ///   standard:window=N                     — sliding-window K/V
+    ///   no-cache                              — full re-forward per step (O(N²)); debug
+    ///   markov-rs[:window=N]                  — residual-stream replacement
+    ///   markov-rs-codec[:window=N]            — markov-rs with bf16 cold tier (2× cold saving)
+    ///   unlimited-context:window=N            — per-window K/V checkpoints
+    ///   turbo-quant[:bits=3|4]                — WHT + Lloyd-Max codec; experimental
+    ///   apollo:layer=N,coef=F,top_k=K         — boundary-residual injection; experimental
+    ///   boundary-kv:chunk_tokens=N,sequence_id=S  — Standard + larql-boundary frame emission
     ///
-    /// Example: `--engine standard,markov-rs:window=512,unlimited-context:window=256`.
-    #[arg(long, value_name = "ENGINE,...")]
+    /// List separator: `;` (preferred) or `,` (legacy). Use `;` when any engine
+    /// carries multiple params, since `,` collides with the param separator.
+    ///
+    /// Example (single param each — `,` is safe):
+    ///   `--engine standard,markov-rs:window=512`
+    ///
+    /// Example (multi-param engine — use `;`):
+    ///   `--engine "standard;boundary-kv:chunk_tokens=64,sequence_id=demo"`
+    #[arg(long, value_name = "ENGINE[;ENGINE]...")]
     pub engine: Option<String>,
 
     /// Route FFN to a remote larql-server for the bench run.

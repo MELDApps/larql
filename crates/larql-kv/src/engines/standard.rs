@@ -107,7 +107,7 @@ impl StandardEngine {
     }
 
     /// Shared prefill body — both `prefill` (index=None) and
-    /// `prefill_q4k` (index=Some) route through here. Matches on the
+    /// `prefill_quant` (index=Some) route through here. Matches on the
     /// `BackendSlot` to pick sync vs async dispatch.
     fn do_prefill(
         &mut self,
@@ -140,7 +140,7 @@ impl StandardEngine {
     }
 
     /// Shared decode-step body — both `decode_step` (index=None) and
-    /// `decode_step_q4k` (index=Some) route through here.
+    /// `decode_step_quant` (index=Some) route through here.
     fn do_decode_step(
         &mut self,
         weights: &ModelWeights,
@@ -216,7 +216,7 @@ impl KvEngine for StandardEngine {
         self.do_decode_step(weights, ffn, token_id, None)
     }
 
-    fn prefill_q4k(
+    fn prefill_quant(
         &mut self,
         weights: &mut ModelWeights,
         ffn: &dyn FfnBackend,
@@ -246,7 +246,7 @@ impl KvEngine for StandardEngine {
         self.do_prefill(weights, ffn, token_ids, Some(index))
     }
 
-    fn decode_step_q4k(
+    fn decode_step_quant(
         &mut self,
         weights: &mut ModelWeights,
         ffn: &dyn FfnBackend,
@@ -255,7 +255,7 @@ impl KvEngine for StandardEngine {
         _backend: &dyn larql_inference::ComputeBackend,
     ) -> Option<Array2<f32>> {
         let handles = self.handles.as_mut()?;
-        // If prefill_q4k used the coarse path, `handles` is a one-element
+        // If prefill_quant used the coarse path, `handles` is a one-element
         // vec carrying the backend's whole-model cache. Try the coarse
         // decode step first.
         if handles.len() == 1 {

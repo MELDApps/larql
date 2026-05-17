@@ -92,12 +92,7 @@ struct AccuracyReport {
 pub fn run(args: AccuracyArgs) -> Result<(), Box<dyn std::error::Error>> {
     let model_path = cache::resolve_model(&args.model)?;
 
-    let engine_specs: Vec<&str> = args
-        .engines
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let engine_specs: Vec<String> = EngineKind::split_specs(&args.engines);
     if engine_specs.is_empty() {
         return Err("no engines selected: pass --engines standard,markov-rs,...".into());
     }

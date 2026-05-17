@@ -158,12 +158,8 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
             let kv_ref_bytes =
                 larql_kv::markov_residual::kv_memory_bytes_for_seq(&weights, token_ids.len());
 
-            for engine_name in engine_list
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-            {
-                match EngineKind::from_name(engine_name) {
+            for engine_name in EngineKind::split_specs(engine_list) {
+                match EngineKind::from_name(&engine_name) {
                     Some(kind) => {
                         let backend = if want_metal {
                             larql_inference::default_engine_backend()
@@ -195,12 +191,8 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
             let kv_ref_bytes =
                 larql_kv::markov_residual::kv_memory_bytes_for_seq(&weights, token_ids.len());
 
-            for engine_name in engine_list
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-            {
-                match EngineKind::from_name(engine_name) {
+            for engine_name in EngineKind::split_specs(engine_list) {
+                match EngineKind::from_name(&engine_name) {
                     Some(kind) => {
                         let backend = if want_metal {
                             larql_inference::default_engine_backend()

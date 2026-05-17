@@ -104,6 +104,11 @@ impl<'a> BuildContext<'a> {
             safetensors_sha256: None,
             extracted_at: chrono_now(),
             larql_version: env!("CARGO_PKG_VERSION").to_string(),
+            // v1 provenance — populated once the extractor learns to
+            // fetch the upstream commit hash + safetensors digests.
+            base_model_sha: None,
+            extractor_sha: None,
+            base_safetensors_sha256: None,
         });
         config.checksums = crate::format::checksums::compute_checksums(self.output_dir).ok();
 

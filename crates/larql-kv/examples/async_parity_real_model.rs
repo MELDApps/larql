@@ -1,6 +1,6 @@
 //! Real-model proof for the A5 async-engine opt-in on Gemma 3 4B Q4K.
 //!
-//! Now that `StandardEngine::prefill_q4k` routes through the dispatch
+//! Now that `StandardEngine::prefill_quant` routes through the dispatch
 //! trait (via the `kv-dispatch-quantization.md` Phase 1 refactor),
 //! this example loads `gemma3-4b-q4k-v2.vindex` and runs N tokens
 //! through both `StandardEngine::new` (sync) and
@@ -76,8 +76,8 @@ fn run_engine_q4k(
 
     let t_pre = Instant::now();
     let mut hidden = engine
-        .prefill_q4k(weights, &ffn, index, prompt_tokens, backend)
-        .expect("prefill_q4k");
+        .prefill_quant(weights, &ffn, index, prompt_tokens, backend)
+        .expect("prefill_quant");
     let prefill_ms = t_pre.elapsed().as_secs_f64() * 1000.0;
 
     let mut emitted = Vec::with_capacity(n_tokens);
@@ -87,8 +87,8 @@ fn run_engine_q4k(
     for _ in 0..n_tokens {
         let t = Instant::now();
         hidden = engine
-            .decode_step_q4k(weights, &ffn, index, last, backend)
-            .expect("decode_step_q4k");
+            .decode_step_quant(weights, &ffn, index, last, backend)
+            .expect("decode_step_quant");
         decode_times.push(t.elapsed().as_secs_f64() * 1000.0);
         last = argmax(&hidden_to_raw_logits(weights, &hidden));
         emitted.push(last);

@@ -103,7 +103,7 @@ pub(super) fn run_engine(
     })
 }
 
-/// Q4K engine bench: uses `prefill_q4k`/`decode_step_q4k` which route through
+/// Q4K engine bench: uses `prefill_quant`/`decode_step_quant` which route through
 /// the Metal pipeline for UnlimitedContext and WalkFfn Q4K FFN for MarkovRS.
 pub(super) fn run_engine_q4k(
     weights: &mut larql_inference::ModelWeights,
@@ -120,7 +120,7 @@ pub(super) fn run_engine_q4k(
         // (= `larql_compute::default_backend()`) lost its Metal detection
         // after the `larql-compute-metal` extraction and always returns
         // CpuBackend now. Engines that look at `backend.has_q4()` to
-        // decide whether to route through `q4k_decode_token` / Metal's
+        // decide whether to route through `fused_decode_step` / Metal's
         // fused `decode_token` would get a CpuBackend with `has_q4()
         // == true` and then `backend.decode_token()` returns None (CPU
         // doesn't implement the fused kernel), silently falling back to
@@ -159,7 +159,7 @@ pub(super) fn run_engine_q4k(
 
     let t_pre = Instant::now();
     let mut hidden = engine
-        .prefill_q4k(weights, &ffn, index, token_ids, be)
+        .prefill_quant(weights, &ffn, index, token_ids, be)
         .ok_or("Q4K engine prefill failed")?;
     let prefill_ms = t_pre.elapsed().as_secs_f64() * 1000.0;
 
@@ -170,7 +170,7 @@ pub(super) fn run_engine_q4k(
     for _ in 0..max_steps {
         let t = Instant::now();
         hidden = engine
-            .decode_step_q4k(weights, &ffn, index, last_token, be)
+            .decode_step_quant(weights, &ffn, index, last_token, be)
             .ok_or("Q4K engine decode_step failed")?;
         decode_ms_all.push(t.elapsed().as_secs_f64() * 1000.0);
         last_token = pick_next!(&hidden);

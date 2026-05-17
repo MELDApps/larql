@@ -344,7 +344,7 @@ fn vec_to_2d_row(v: Vec<f32>) -> Array2<f32> {
 /// Previously lived inline in `larql-kv/engines/unlimited_context/engine.rs`;
 /// promoted here so [`crate::kv_dispatch::metal::MetalBackend::coarse_prefill`]
 /// can use it without an `larql-inference → larql-kv` dep cycle.
-pub fn metal_fused_prefill(
+pub fn fused_prefill(
     weights: &ModelWeights,
     index: &VectorIndex,
     token_ids: &[u32],
@@ -415,12 +415,12 @@ pub fn metal_fused_prefill(
 
 /// Metal-fused single-token decode: run one token through all layers via
 /// the backend's fused `decode_token` kernel, using the K/V cache
-/// populated by a prior [`metal_fused_prefill`] call on the same backend.
+/// populated by a prior [`fused_prefill`] call on the same backend.
 ///
 /// Returns `None` for CPU backends (no fused `decode_token` impl) and
 /// for vindex shapes the fused pipeline can't handle. Public counterpart
 /// to [`predict_kquant_decode_step_direct`] for the Metal side.
-pub fn metal_fused_decode_step(
+pub fn fused_decode_step(
     weights: &ModelWeights,
     index: &VectorIndex,
     token_id: u32,
@@ -1055,6 +1055,40 @@ mod tests {
         t.add(CachedTimings { dequant_ms: 1.5 });
         t.add(CachedTimings { dequant_ms: 2.25 });
         assert_eq!(t.dequant_ms, 3.75);
+    }
+
+    // ── fused_prefill / fused_decode_step ────────────────────────────────
+    //
+    // The public fused fast path: dispatches to `backend.prefill_q4` /
+    // `backend.decode_token`. **Not Metal-specific** — `CpuBackend` returns
+    // `has_q4() == true` (it ships a C Q4 kernel) and may implement either
+    // method. The functions short-circuit when the vindex lacks the
+    // interleaved FFN bytes the fused pipeline needs (the case for the
+    // synthetic test vindex below), regardless of which backend is used.
+    // The earlier name `metal_fused_*` was a misnomer.
+
+    #[test]
+    fn fused_prefill_returns_none_on_synthetic_vindex() {
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let backend = CpuBackend;
+        let result = fused_prefill(&weights, &index, &[0u32, 1], &backend);
+        assert!(
+            result.is_none(),
+            "synthetic vindex without interleaved fused-pipeline bytes must short-circuit"
+        );
+    }
+
+    #[test]
+    fn fused_decode_step_returns_none_on_synthetic_vindex() {
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let backend = CpuBackend;
+        let result = fused_decode_step(&weights, &index, 0, &backend);
+        assert!(
+            result.is_none(),
+            "synthetic vindex without interleaved fused-pipeline bytes must short-circuit"
+        );
     }
 }
 

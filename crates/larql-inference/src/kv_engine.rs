@@ -187,7 +187,7 @@ pub trait KvEngine: Send {
     /// `weights` is `&mut` so the engine can lazily insert dequantised f32
     /// attention tensors into `weights.tensors` on the first call (one-time
     /// cost; subsequent decode steps reuse the cached tensors).
-    fn prefill_q4k(
+    fn prefill_quant(
         &mut self,
         weights: &mut ModelWeights,
         ffn: &dyn FfnBackend,
@@ -201,9 +201,9 @@ pub trait KvEngine: Send {
 
     /// One autoregressive decode step using Q4K weights.
     ///
-    /// Same routing semantics as [`prefill_q4k`]: Metal via `decode_token`
+    /// Same routing semantics as [`prefill_quant`]: Metal via `decode_token`
     /// when available, f32 fallback otherwise.
-    fn decode_step_q4k(
+    fn decode_step_quant(
         &mut self,
         weights: &mut ModelWeights,
         ffn: &dyn FfnBackend,
@@ -302,7 +302,7 @@ mod tests {
 
     /// Synthetic engine that only implements the required trait methods,
     /// leaving every default (`window_tokens`, `cold_bytes`, `stage_summary`,
-    /// `prefill_q4k`, `decode_step_q4k`) to fire. Exercises the default
+    /// `prefill_quant`, `decode_step_quant`) to fire. Exercises the default
     /// bodies that no shipped engine routes through (every concrete engine
     /// overrides them).
     struct DefaultsOnlyEngine {
@@ -369,18 +369,18 @@ mod tests {
         };
 
         let mut weights_q4k = crate::test_utils::make_test_weights();
-        let out = engine.prefill_q4k(&mut weights_q4k, &ffn, &index, &[1, 2, 3], &*backend);
+        let out = engine.prefill_quant(&mut weights_q4k, &ffn, &index, &[1, 2, 3], &*backend);
         assert!(out.is_some());
         assert_eq!(
             engine.prefill_calls, 1,
-            "default prefill_q4k must dispatch to prefill"
+            "default prefill_quant must dispatch to prefill"
         );
 
-        let out = engine.decode_step_q4k(&mut weights_q4k, &ffn, &index, 4, &*backend);
+        let out = engine.decode_step_quant(&mut weights_q4k, &ffn, &index, 4, &*backend);
         assert!(out.is_some());
         assert_eq!(
             engine.decode_calls, 1,
-            "default decode_step_q4k must dispatch to decode_step"
+            "default decode_step_quant must dispatch to decode_step"
         );
     }
 }

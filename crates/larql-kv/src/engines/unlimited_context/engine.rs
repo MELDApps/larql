@@ -361,7 +361,7 @@ impl KvEngine for UnlimitedContextEngine {
     /// the fused Q4 pipeline. The Metal path runs at ~75 tok/s on Gemma 3 4B
     /// (same as `larql bench`) because it submits all 34 layers in one command
     /// buffer rather than per-layer CPU dispatch.
-    fn prefill_q4k(
+    fn prefill_quant(
         &mut self,
         weights: &mut ModelWeights,
         _ffn: &dyn FfnBackend,
@@ -370,7 +370,7 @@ impl KvEngine for UnlimitedContextEngine {
         backend: &dyn ComputeBackend,
     ) -> Option<Array2<f32>> {
         // Try Metal full pipeline. Returns None for CpuBackend — fall through.
-        if let Some(h) = q4k_prefill_metal(weights, index, token_ids, backend) {
+        if let Some(h) = fused_prefill(weights, index, token_ids, backend) {
             self.abs_offset = token_ids.len();
             self.last_hidden = Some(h.clone());
             return Some(h);
@@ -381,7 +381,7 @@ impl KvEngine for UnlimitedContextEngine {
         self.last_hidden.clone()
     }
 
-    fn decode_step_q4k(
+    fn decode_step_quant(
         &mut self,
         weights: &mut ModelWeights,
         _ffn: &dyn FfnBackend,
@@ -390,7 +390,7 @@ impl KvEngine for UnlimitedContextEngine {
         backend: &dyn ComputeBackend,
     ) -> Option<Array2<f32>> {
         // Try Metal decode_token. Returns None for CpuBackend — fall through.
-        if let Some(h) = q4k_decode_token(weights, index, token_id, backend) {
+        if let Some(h) = fused_decode_step(weights, index, token_id, backend) {
             self.abs_offset += 1;
             self.last_hidden = Some(h.clone());
             return Some(h);
@@ -406,15 +406,15 @@ impl KvEngine for UnlimitedContextEngine {
 
 /// Run GPU prefill via `backend.prefill_q4` using Q4K pipeline layers built
 /// from `index`. Returns the last-token hidden state on success.
-/// Re-export — moved to [`larql_inference::vindex::metal_fused_prefill`]
+/// Re-export — moved to [`larql_inference::vindex::fused_prefill`]
 /// (2026-05-16) so `MetalBackend::coarse_prefill` can call it without
 /// an `larql-inference → larql-kv` dep cycle.
-pub(crate) use larql_inference::vindex::metal_fused_prefill as q4k_prefill_metal;
+pub(crate) use larql_inference::vindex::fused_prefill as fused_prefill;
 
 /// Run one Metal decode step via `backend.decode_token`.
-/// Re-export — moved to [`larql_inference::vindex::metal_fused_decode_step`]
+/// Re-export — moved to [`larql_inference::vindex::fused_decode_step`]
 /// (2026-05-16).
-pub(crate) use larql_inference::vindex::metal_fused_decode_step as q4k_decode_token;
+pub(crate) use larql_inference::vindex::fused_decode_step as fused_decode_step;
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 

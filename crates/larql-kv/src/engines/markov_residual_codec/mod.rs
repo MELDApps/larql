@@ -16,6 +16,7 @@ pub mod codec;
 pub mod compute;
 pub mod engine;
 pub mod store;
+pub mod walk;
 
 pub use codec::ColdResidualCodec;
 pub use engine::MarkovResidualCodecEngine;

@@ -31,6 +31,12 @@ impl<'a> StreamingContext<'a> {
                 safetensors_sha256: None,
                 extracted_at: crate::extract::build_helpers::chrono_now(),
                 larql_version: env!("CARGO_PKG_VERSION").to_string(),
+                // v1 provenance — populated once the extractor learns
+                // to fetch the upstream commit hash + safetensors
+                // digests.
+                base_model_sha: None,
+                extractor_sha: None,
+                base_safetensors_sha256: None,
             }),
             checksums: None,
             extract_level: self.extract_level,

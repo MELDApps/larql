@@ -32,7 +32,7 @@
 //!
 //! ## Architecture notes
 //!
-//! - **Metal Q4K path** (`prefill_q4k` / `decode_step_q4k`): all four engines
+//! - **Metal Q4K path** (`prefill_quant` / `decode_step_quant`): all four engines
 //!   use the Metal `decode_token` full pipeline when a Q4K VectorIndex and a
 //!   Metal backend are available. This gives 93-95 tok/s — matching or exceeding
 //!   the standard larql-metal path (76 tok/s) because the engine bench uses

@@ -5,8 +5,8 @@ use larql_vindex::VectorIndex;
 use ndarray::Array2;
 
 use super::compute::{rs_decode_step, rs_decode_step_profiled, rs_prefill};
-use super::q4k::{ensure_attn_tensors_dequantised, rs_decode_step_walk, rs_prefill_walk};
 use super::store::RsStore;
+use super::walk::{ensure_attn_tensors_dequantised, rs_decode_step_walk, rs_prefill_walk};
 use crate::profiler::EngineProfiler;
 use crate::{DecodeStageSummary, EngineInfo, KvEngine};
 use larql_inference::ffn::FfnBackend;
@@ -123,7 +123,7 @@ impl KvEngine for MarkovResidualEngine {
         Some(self.profile.summary("markov-rs", self.backend.name()))
     }
 
-    fn prefill_q4k(
+    fn prefill_quant(
         &mut self,
         weights: &mut ModelWeights,
         _ffn: &dyn FfnBackend,
@@ -131,8 +131,8 @@ impl KvEngine for MarkovResidualEngine {
         token_ids: &[u32],
         backend: &dyn ComputeBackend,
     ) -> Option<Array2<f32>> {
-        use crate::engines::unlimited_context::engine::q4k_prefill_metal;
-        if let Some(h) = q4k_prefill_metal(weights, index, token_ids, backend) {
+        use crate::engines::unlimited_context::engine::fused_prefill;
+        if let Some(h) = fused_prefill(weights, index, token_ids, backend) {
             self.metal_prefill_done = true;
             self.store = None;
             return Some(h);
@@ -145,7 +145,7 @@ impl KvEngine for MarkovResidualEngine {
         Some(hidden)
     }
 
-    fn decode_step_q4k(
+    fn decode_step_quant(
         &mut self,
         weights: &mut ModelWeights,
         _ffn: &dyn FfnBackend,
@@ -153,9 +153,9 @@ impl KvEngine for MarkovResidualEngine {
         token_id: u32,
         backend: &dyn ComputeBackend,
     ) -> Option<Array2<f32>> {
-        use crate::engines::unlimited_context::engine::q4k_decode_token;
+        use crate::engines::unlimited_context::engine::fused_decode_step;
         if self.metal_prefill_done {
-            if let Some(h) = q4k_decode_token(weights, index, token_id, backend) {
+            if let Some(h) = fused_decode_step(weights, index, token_id, backend) {
                 return Some(h);
             }
         }
@@ -344,9 +344,9 @@ mod tests {
 
     // ── Q4K paths via CPU fallback ────────────────────────────────────────
     //
-    // On a CPU backend, `q4k_prefill_metal` returns `None`, so the engine
+    // On a CPU backend, `fused_prefill` returns `None`, so the engine
     // falls through to `rs_prefill_walk` against the synthetic VectorIndex.
-    // This exercises the prefill_q4k / decode_step_q4k branches that the
+    // This exercises the prefill_quant / decode_step_quant branches that the
     // Metal-only happy path also takes (apart from the Metal early-return).
 
     #[test]
@@ -360,8 +360,8 @@ mod tests {
         let ffn = NullFfn;
         let mut engine = MarkovResidualEngine::new(None);
         let h = engine
-            .prefill_q4k(&mut weights, &ffn, &index, &[0u32, 1, 2], &*backend)
-            .expect("prefill_q4k cpu fallback");
+            .prefill_quant(&mut weights, &ffn, &index, &[0u32, 1, 2], &*backend)
+            .expect("prefill_quant cpu fallback");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(engine.memory_bytes() > 0);
     }
@@ -375,16 +375,16 @@ mod tests {
         let ffn = NullFfn;
         let mut engine = MarkovResidualEngine::new(None);
         engine
-            .prefill_q4k(&mut weights, &ffn, &index, &[0u32, 1], &*backend)
-            .expect("prefill_q4k");
+            .prefill_quant(&mut weights, &ffn, &index, &[0u32, 1], &*backend)
+            .expect("prefill_quant");
         let mem_before = engine.memory_bytes();
         let h = engine
-            .decode_step_q4k(&mut weights, &ffn, &index, 2, &*backend)
-            .expect("decode_step_q4k cpu fallback");
+            .decode_step_quant(&mut weights, &ffn, &index, 2, &*backend)
+            .expect("decode_step_quant cpu fallback");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(
             engine.memory_bytes() > mem_before,
-            "store should grow after decode_step_q4k"
+            "store should grow after decode_step_quant"
         );
     }
 }

@@ -191,6 +191,59 @@ impl EngineKind {
         }
     }
 
+    /// Split an engine-list string into individual specs.
+    ///
+    /// Engine specs can carry params (`name:k=v,k=v`), and commas inside
+    /// params clash with the legacy comma-separator for engine lists.
+    /// The splitter handles both forms:
+    ///
+    /// - **`;`-separated** (preferred when any engine carries multiple
+    ///   params): `"a:x=1,y=2;b:p=3"` → `["a:x=1,y=2", "b:p=3"]`.
+    /// - **`,`-separated** (legacy): splits by `,`, then merges
+    ///   adjacent pieces back into the previous spec when a piece fails
+    ///   to parse via [`Self::from_name`]. This makes
+    ///   `"boundary-kv:chunk_tokens=64,sequence_id=demo"` round-trip as
+    ///   a single spec under the legacy form, while keeping
+    ///   `"standard,markov-rs"` and `"standard:window=512,markov-rs"`
+    ///   working.
+    ///
+    /// Returns owned `String`s because merging requires building new
+    /// values from pieces of the input.
+    pub fn split_specs(spec: &str) -> Vec<String> {
+        // Prefer `;` when present.
+        if spec.contains(';') {
+            return spec
+                .split(';')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        // Legacy `,` path with reparse-driven merge.
+        let pieces: Vec<&str> = spec
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut result: Vec<String> = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            // A piece that parses on its own starts a new spec.
+            if Self::from_name(piece).is_some() {
+                result.push(piece.to_string());
+                continue;
+            }
+            // Otherwise it's a continuation of the previous spec's params.
+            if let Some(last) = result.last_mut() {
+                last.push(',');
+                last.push_str(piece);
+            } else {
+                // First piece doesn't parse — keep it so the caller can
+                // surface the parse error rather than silently dropping it.
+                result.push(piece.to_string());
+            }
+        }
+        result
+    }
+
     pub fn display_name(&self) -> &'static str {
         match self {
             EngineKind::Standard { .. } => "standard",
@@ -533,8 +586,8 @@ mod compliance_tests {
         }
     }
 
-    /// Synthetic engine that does not override `prefill_q4k` /
-    /// `decode_step_q4k`. Exercises the default trait methods that route to
+    /// Synthetic engine that does not override `prefill_quant` /
+    /// `decode_step_quant`. Exercises the default trait methods that route to
     /// the f32 fallback — every shipped engine overrides these, so without
     /// this fixture they sit at 0% line coverage.
     struct DefaultMethodsEngine {
@@ -591,20 +644,20 @@ mod compliance_tests {
             decode_calls: 0,
         };
 
-        // Build a separate &mut binding for the `prefill_q4k` call.
+        // Build a separate &mut binding for the `prefill_quant` call.
         let mut weights_for_q4k = larql_inference::test_utils::make_test_weights();
-        let out = engine.prefill_q4k(&mut weights_for_q4k, &ffn, &index, &[1, 2, 3], &*backend);
+        let out = engine.prefill_quant(&mut weights_for_q4k, &ffn, &index, &[1, 2, 3], &*backend);
         assert!(out.is_some());
         assert_eq!(
             engine.prefill_calls, 1,
-            "default prefill_q4k must call prefill"
+            "default prefill_quant must call prefill"
         );
 
-        let out = engine.decode_step_q4k(&mut weights_for_q4k, &ffn, &index, 4, &*backend);
+        let out = engine.decode_step_quant(&mut weights_for_q4k, &ffn, &index, 4, &*backend);
         assert!(out.is_some());
         assert_eq!(
             engine.decode_calls, 1,
-            "default decode_step_q4k must call decode_step"
+            "default decode_step_quant must call decode_step"
         );
     }
 
@@ -620,5 +673,86 @@ mod compliance_tests {
         assert_eq!(engine.cold_bytes(), 0);
         assert!(engine.stage_summary().is_none());
         assert_eq!(engine.name(), "default-methods-test");
+    }
+
+    // ── split_specs ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn split_specs_legacy_comma_for_simple_engines() {
+        // No colons → no param-comma ambiguity. Comma is the legacy separator.
+        let v = EngineKind::split_specs("standard,markov-rs,no-cache");
+        assert_eq!(v, vec!["standard", "markov-rs", "no-cache"]);
+    }
+
+    #[test]
+    fn split_specs_legacy_comma_with_single_param_each() {
+        // Single param per engine is unambiguous under comma split: each
+        // engine's `name:key=value` doesn't contain a comma.
+        let v = EngineKind::split_specs("standard:window=512,markov-rs:window=256");
+        assert_eq!(v, vec!["standard:window=512", "markov-rs:window=256"]);
+    }
+
+    #[test]
+    fn split_specs_semicolon_separator_for_multi_param_engines() {
+        // Multi-param engines need ';' as the list separator to avoid
+        // colliding with their param commas.
+        let v = EngineKind::split_specs(
+            "boundary-kv:chunk_tokens=64,sequence_id=demo;markov-rs:window=256",
+        );
+        assert_eq!(
+            v,
+            vec![
+                "boundary-kv:chunk_tokens=64,sequence_id=demo",
+                "markov-rs:window=256",
+            ]
+        );
+    }
+
+    #[test]
+    fn split_specs_trims_whitespace() {
+        let v = EngineKind::split_specs(" standard , markov-rs ");
+        assert_eq!(v, vec!["standard", "markov-rs"]);
+    }
+
+    #[test]
+    fn split_specs_drops_empty_entries() {
+        let v = EngineKind::split_specs(",,standard,,markov-rs,");
+        assert_eq!(v, vec!["standard", "markov-rs"]);
+    }
+
+    #[test]
+    fn split_specs_semicolon_drops_empties_and_trims() {
+        let v = EngineKind::split_specs(" ; standard ;; markov-rs ; ");
+        assert_eq!(v, vec!["standard", "markov-rs"]);
+    }
+
+    #[test]
+    fn split_specs_single_engine_returns_one_entry() {
+        assert_eq!(EngineKind::split_specs("standard"), vec!["standard"]);
+        assert_eq!(
+            EngineKind::split_specs("boundary-kv:chunk_tokens=64,sequence_id=demo"),
+            vec!["boundary-kv:chunk_tokens=64,sequence_id=demo"]
+        );
+    }
+
+    #[test]
+    fn split_specs_empty_returns_empty_vec() {
+        assert!(EngineKind::split_specs("").is_empty());
+        assert!(EngineKind::split_specs(" ").is_empty());
+        assert!(EngineKind::split_specs(",,,").is_empty());
+        assert!(EngineKind::split_specs(";;;").is_empty());
+    }
+
+    #[test]
+    fn split_specs_round_trips_with_from_name() {
+        // Each split entry must round-trip through EngineKind::from_name.
+        let input = "standard;markov-rs:window=512;boundary-kv:chunk_tokens=64,sequence_id=demo";
+        let specs = EngineKind::split_specs(input);
+        for s in &specs {
+            assert!(
+                EngineKind::from_name(s).is_some(),
+                "spec {s:?} should parse"
+            );
+        }
     }
 }

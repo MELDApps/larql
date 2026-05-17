@@ -656,6 +656,61 @@ mod uncached_path_tests {
         // With max_tokens=1, we emit the seed and skip the decode loop.
         assert!(result.decode_ms.is_empty());
     }
+
+    /// EOS-on-first-token early-return path of `generate_via_cpu_q4k_cached`
+    /// (lines 114-127). Build an EosConfig where every vocab id is EOS so
+    /// whatever the prefill argmax returns triggers the stop.
+    #[test]
+    fn generate_via_cpu_q4k_cached_eos_on_first_token_returns_early() {
+        let mut fx = Q4KTestFixtures::build();
+        let token_ids = vec![1u32, 2, 3];
+        let mut eos = EosConfig::empty();
+        for id in 0..fx.weights.vocab_size as u32 {
+            eos = eos.with_eos_id(id);
+        }
+        let result = generate_via_cpu_q4k(
+            &mut fx.weights,
+            &fx.tokenizer,
+            &token_ids,
+            10,
+            &fx.index,
+            &eos,
+        );
+        assert!(result.error.is_none(), "EOS-stop must be a success");
+        // First token is emitted before the EOS check; no decode steps run.
+        assert_eq!(
+            result.tokens.len(),
+            1,
+            "exactly one token (the seed) is emitted before EOS stops decode"
+        );
+        assert!(result.decode_ms.is_empty());
+    }
+
+    /// EOS-on-first-token early-return path of
+    /// `generate_via_cpu_q4k_uncached` (lines 252-260). Same shape as
+    /// the cached test but routes through the uncached driver by
+    /// disabling cached-decode support (hybrid MoE / cross-layer KV).
+    /// We can't toggle the architecture here, so we call the uncached
+    /// path directly via its private name.
+    #[test]
+    fn generate_via_cpu_q4k_uncached_eos_on_first_token_returns_early() {
+        let mut fx = Q4KTestFixtures::build();
+        let token_ids = vec![1u32, 2];
+        let mut eos = EosConfig::empty();
+        for id in 0..fx.weights.vocab_size as u32 {
+            eos = eos.with_eos_id(id);
+        }
+        let result = generate_via_cpu_q4k_uncached(
+            &mut fx.weights,
+            &fx.tokenizer,
+            &token_ids,
+            10,
+            &fx.index,
+            &eos,
+        );
+        assert!(result.error.is_none());
+        assert_eq!(result.tokens.len(), 1);
+    }
 }
 
 #[cfg(test)]

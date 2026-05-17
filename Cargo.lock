@@ -2398,6 +2398,7 @@ dependencies = [
  "larql-compute-metal",
  "larql-core",
  "larql-models",
+ "larql-vindex-spec",
  "libc",
  "memmap2",
  "mockito",
@@ -2413,6 +2414,15 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokenizers",
+]
+
+[[package]]
+name = "larql-vindex-spec"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

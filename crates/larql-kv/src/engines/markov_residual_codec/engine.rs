@@ -5,9 +5,13 @@ use larql_inference::model::ModelWeights;
 use larql_inference::{cpu_engine_backend, EngineBackend};
 use ndarray::Array2;
 
+use crate::engines::markov_residual::ensure_attn_tensors_dequantised;
 use crate::engines::markov_residual_codec::codec::ColdResidualCodec;
 use crate::engines::markov_residual_codec::compute::{rs_decode_step_codec, rs_prefill_codec};
 use crate::engines::markov_residual_codec::store::RsStoreCodec;
+use crate::engines::markov_residual_codec::walk::{
+    rs_decode_step_codec_walk, rs_prefill_codec_walk,
+};
 use crate::{EngineInfo, KvEngine};
 
 /// `MarkovResidualCodecEngine` — `MarkovResidualEngine` with a codec-encoded
@@ -17,6 +21,10 @@ pub struct MarkovResidualCodecEngine {
     codec: ColdResidualCodec,
     store: Option<RsStoreCodec>,
     backend: Box<dyn EngineBackend>,
+    /// `true` once `prefill_quant` has taken the Metal fast path (which
+    /// bypasses the residual store entirely). Subsequent `decode_step_quant`
+    /// calls route through `fused_decode_step`. Matches `MarkovResidualEngine`.
+    metal_prefill_done: bool,
 }
 
 impl MarkovResidualCodecEngine {
@@ -36,6 +44,7 @@ impl MarkovResidualCodecEngine {
             codec,
             store: None,
             backend,
+            metal_prefill_done: false,
         }
     }
 
@@ -111,6 +120,65 @@ impl KvEngine for MarkovResidualCodecEngine {
 
     fn cold_bytes(&self) -> usize {
         self.store.as_ref().map_or(0, |s| s.cold_bytes())
+    }
+
+    fn prefill_quant(
+        &mut self,
+        weights: &mut ModelWeights,
+        _ffn: &dyn FfnBackend,
+        index: &larql_inference::larql_vindex::VectorIndex,
+        token_ids: &[u32],
+        backend: &dyn larql_compute::ComputeBackend,
+    ) -> Option<Array2<f32>> {
+        // Same routing as `MarkovResidualEngine::prefill_quant`:
+        //
+        //   1. Try the Metal fused fast path. It bypasses the residual
+        //      store entirely (no codec applied), so when this path runs
+        //      the engine is effectively `Standard`-on-Metal — the codec
+        //      only matters when overflow forces residual recompute.
+        //   2. Otherwise dequant attention tensors and route through
+        //      `rs_prefill_codec_walk` (Q4K-aware FFN via WalkFfn +
+        //      Q4K-native K/V via `recompute_kv(Some(index))`).
+        use crate::engines::unlimited_context::engine::fused_prefill;
+        if let Some(h) = fused_prefill(weights, index, token_ids, backend) {
+            self.metal_prefill_done = true;
+            self.store = None;
+            return Some(h);
+        }
+        self.metal_prefill_done = false;
+        ensure_attn_tensors_dequantised(weights, index);
+        let result = rs_prefill_codec_walk(
+            weights,
+            index,
+            token_ids,
+            self.window_size,
+            self.codec,
+            backend,
+        );
+        let hidden = result.hidden.clone();
+        self.store = Some(result.store);
+        Some(hidden)
+    }
+
+    fn decode_step_quant(
+        &mut self,
+        weights: &mut ModelWeights,
+        _ffn: &dyn FfnBackend,
+        index: &larql_inference::larql_vindex::VectorIndex,
+        token_id: u32,
+        backend: &dyn larql_compute::ComputeBackend,
+    ) -> Option<Array2<f32>> {
+        use crate::engines::unlimited_context::engine::fused_decode_step;
+        if self.metal_prefill_done {
+            if let Some(h) = fused_decode_step(weights, index, token_id, backend) {
+                return Some(h);
+            }
+        }
+        ensure_attn_tensors_dequantised(weights, index);
+        let rs = self.store.take()?;
+        let (hidden, new_rs) = rs_decode_step_codec_walk(weights, index, token_id, rs, backend)?;
+        self.store = Some(new_rs);
+        Some(hidden)
     }
 }
 

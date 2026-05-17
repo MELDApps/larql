@@ -304,7 +304,7 @@ impl KvEngine for TurboQuantEngine {
     /// (36 KB/window vs 278 KB for UnlimitedContext — 7.7× smaller boundary checkpoints).
     ///
     /// Falls back to CPU dequant path when Metal is unavailable.
-    fn prefill_q4k(
+    fn prefill_quant(
         &mut self,
         weights: &mut ModelWeights,
         _ffn: &dyn FfnBackend,
@@ -312,9 +312,9 @@ impl KvEngine for TurboQuantEngine {
         token_ids: &[u32],
         backend: &dyn ComputeBackend,
     ) -> Option<Array2<f32>> {
-        use crate::engines::unlimited_context::engine::q4k_prefill_metal;
+        use crate::engines::unlimited_context::engine::fused_prefill;
         // Try Metal full pipeline first.
-        if let Some(h) = q4k_prefill_metal(weights, index, token_ids, backend) {
+        if let Some(h) = fused_prefill(weights, index, token_ids, backend) {
             self.abs_position = token_ids.len();
             return Some(h);
         }
@@ -322,7 +322,7 @@ impl KvEngine for TurboQuantEngine {
         self.prefill_q4k_cpu(weights, index, token_ids, backend)
     }
 
-    fn decode_step_q4k(
+    fn decode_step_quant(
         &mut self,
         weights: &mut ModelWeights,
         _ffn: &dyn FfnBackend,
@@ -330,8 +330,8 @@ impl KvEngine for TurboQuantEngine {
         token_id: u32,
         backend: &dyn ComputeBackend,
     ) -> Option<Array2<f32>> {
-        use crate::engines::unlimited_context::engine::q4k_decode_token;
-        if let Some(h) = q4k_decode_token(weights, index, token_id, backend) {
+        use crate::engines::unlimited_context::engine::fused_decode_step;
+        if let Some(h) = fused_decode_step(weights, index, token_id, backend) {
             self.abs_position += 1;
             return Some(h);
         }
@@ -754,7 +754,7 @@ mod integration_tests {
 
     // ── Q4K paths via CPU fallback ────────────────────────────────────────
     //
-    // `q4k_prefill_metal` / `q4k_decode_token` return `None` on a CPU
+    // `fused_prefill` / `fused_decode_step` return `None` on a CPU
     // backend, so the engine falls through to `prefill_q4k_cpu` /
     // `decode_step_q4k_cpu` against the synthetic VectorIndex. Exercises
     // the Q4K branches without needing a real Metal-quantised model.
@@ -768,13 +768,13 @@ mod integration_tests {
         let ffn = NullFfn;
         let mut engine = TurboQuantEngine::new(4);
         let h = engine
-            .prefill_q4k(&mut weights, &ffn, &index, &[0u32, 1, 2], &*backend)
-            .expect("prefill_q4k cpu fallback");
+            .prefill_quant(&mut weights, &ffn, &index, &[0u32, 1, 2], &*backend)
+            .expect("prefill_quant cpu fallback");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert_eq!(
             engine.layers.len(),
             weights.num_layers,
-            "one CompressedLayer per model layer after prefill_q4k"
+            "one CompressedLayer per model layer after prefill_quant"
         );
         assert!(engine.memory_bytes() > 0);
     }
@@ -788,16 +788,16 @@ mod integration_tests {
         let ffn = NullFfn;
         let mut engine = TurboQuantEngine::new(4);
         engine
-            .prefill_q4k(&mut weights, &ffn, &index, &[0u32, 1], &*backend)
-            .expect("prefill_q4k");
+            .prefill_quant(&mut weights, &ffn, &index, &[0u32, 1], &*backend)
+            .expect("prefill_quant");
         let mem_before = engine.memory_bytes();
         let h = engine
-            .decode_step_q4k(&mut weights, &ffn, &index, 2, &*backend)
-            .expect("decode_step_q4k cpu fallback");
+            .decode_step_quant(&mut weights, &ffn, &index, 2, &*backend)
+            .expect("decode_step_quant cpu fallback");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(
             engine.memory_bytes() > mem_before,
-            "compressed cache should grow after decode_step_q4k"
+            "compressed cache should grow after decode_step_quant"
         );
     }
 }

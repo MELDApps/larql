@@ -19,8 +19,8 @@ mod tensors;
 mod walk_ffn;
 
 pub use cached::{
-    attention_decode_step_native, ffn_decode_step_native, metal_fused_decode_step,
-    metal_fused_prefill, predict_kquant_decode_step, predict_kquant_decode_step_direct,
+    attention_decode_step_native, ffn_decode_step_native, fused_decode_step,
+    fused_prefill, predict_kquant_decode_step, predict_kquant_decode_step_direct,
     predict_kquant_prefill, supports_cached_decode, supports_direct_matvec_decode, CachedTimings,
     CpuKvCache,
 };

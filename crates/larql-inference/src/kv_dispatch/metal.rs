@@ -146,7 +146,7 @@ impl KvDispatch for MetalBackend {
         index: Option<&larql_vindex::VectorIndex>,
     ) -> Option<(Array2<f32>, KvHandle)> {
         let index = index?;
-        let hidden = crate::vindex::metal_fused_prefill(weights, index, token_ids, self)?;
+        let hidden = crate::vindex::fused_prefill(weights, index, token_ids, self)?;
         Some((hidden, KvHandle::new(MetalCoarseHandle)))
     }
 
@@ -163,7 +163,7 @@ impl KvDispatch for MetalBackend {
         // `_handle` is a sentinel populated by `coarse_prefill`; we
         // don't read from it. `_abs_position` is tracked by the backend
         // via the K/V cache row count.
-        crate::vindex::metal_fused_decode_step(weights, index, token_id, self)
+        crate::vindex::fused_decode_step(weights, index, token_id, self)
     }
 }
 

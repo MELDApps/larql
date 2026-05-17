@@ -313,4 +313,118 @@ mod tests {
         let s = decode_token_raw(&tok, 9999);
         assert_eq!(s, "[9999]");
     }
+
+    /// `load_tokenizer` honours `tokenizer_class: "GPT2Tokenizer"` by
+    /// patching the shipped tokenizer.json's first Split regex. Covers
+    /// the `Some("GPT2Tokenizer")` arm of the match (line 39).
+    #[test]
+    fn load_tokenizer_patches_gpt2_pretok_when_tokenizer_class_says_gpt2() {
+        let dir = std::env::temp_dir().join(format!(
+            "larql_tokenizer_gpt2_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Minimal tokenizer.json with a Sequence pre-tokenizer.
+        let tj = serde_json::json!({
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [],
+            "normalizer": null,
+            "pre_tokenizer": {
+                "type": "Sequence",
+                "pretokenizers": [
+                    {"type": "Split", "pattern": {"Regex": "garbage-pattern"},
+                     "behavior": "Removed", "invert": true},
+                    {"type": "ByteLevel", "add_prefix_space": false,
+                     "trim_offsets": true, "use_regex": true}
+                ]
+            },
+            "post_processor": null,
+            "decoder": null,
+            "model": {"type": "WordLevel", "vocab": {"a": 0}, "unk_token": "a"}
+        });
+        std::fs::write(dir.join(TOKENIZER_JSON), serde_json::to_vec(&tj).unwrap()).unwrap();
+        // tokenizer_config.json declares GPT2Tokenizer.
+        std::fs::write(
+            dir.join(TOKENIZER_CONFIG_JSON),
+            br#"{"tokenizer_class":"GPT2Tokenizer"}"#,
+        )
+        .unwrap();
+
+        // Without the patch, the garbage regex would make
+        // `Tokenizer::from_bytes` fail. With the patch, the GPT-2
+        // regex installs cleanly and the load succeeds.
+        let result = load_tokenizer(&dir);
+        assert!(
+            result.is_ok(),
+            "GPT-2-class tokenizer should patch and load: {result:?}"
+        );
+
+        let _ = std::fs::remove_file(dir.join(TOKENIZER_JSON));
+        let _ = std::fs::remove_file(dir.join(TOKENIZER_CONFIG_JSON));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// `maybe_patch_gpt2_pretok` returns `None` when the Regex pattern
+    /// field exists but isn't a string (line 78 — `return None`).
+    #[test]
+    fn maybe_patch_gpt2_pretok_returns_none_when_regex_is_not_string() {
+        let tj = serde_json::json!({
+            "pre_tokenizer": {
+                "type": "Sequence",
+                "pretokenizers": [
+                    {"type": "Split",
+                     // Regex must be a string; an object value here trips
+                     // the `is_string()` check.
+                     "pattern": {"Regex": {"nested": "object"}},
+                     "behavior": "Removed", "invert": true},
+                ]
+            },
+            "model": {"type": "BPE"},
+        });
+        let raw = serde_json::to_vec(&tj).unwrap();
+        assert!(maybe_patch_gpt2_pretok(&raw).is_none());
+    }
+
+    /// `read_tokenizer_class` returns None when the config file exists
+    /// but lacks the `tokenizer_class` key.
+    #[test]
+    fn read_tokenizer_class_returns_none_when_field_absent() {
+        let dir = std::env::temp_dir().join(format!(
+            "larql_tokenizer_class_absent_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(TOKENIZER_CONFIG_JSON), br#"{"other":"x"}"#).unwrap();
+        assert!(read_tokenizer_class(&dir).is_none());
+        let _ = std::fs::remove_file(dir.join(TOKENIZER_CONFIG_JSON));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// `read_tokenizer_class` returns None when the config file is
+    /// missing (the `?` on the `read` call short-circuits).
+    #[test]
+    fn read_tokenizer_class_returns_none_when_file_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "larql_tokenizer_class_missing_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(read_tokenizer_class(&dir).is_none());
+        let _ = std::fs::remove_dir(&dir);
+    }
 }
