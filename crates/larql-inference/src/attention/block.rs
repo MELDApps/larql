@@ -6,7 +6,6 @@
 use super::gqa::{
     gqa_attention_with_all_weights, gqa_attention_with_weights, gqa_reduced_qk_all_weights,
 };
-use super::rope::apply_rope_partial;
 use super::{AttentionAllWeights, AttentionWeights, SharedKV};
 use ndarray::{s, Array2};
 

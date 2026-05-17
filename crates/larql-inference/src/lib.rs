@@ -98,7 +98,7 @@ pub fn cpu_engine_backend() -> Box<dyn EngineBackend> {
 /// the `metal` feature is enabled, CPU otherwise. Parallel to
 /// `default_backend()` but returns the wider trait object.
 pub fn default_engine_backend() -> Box<dyn EngineBackend> {
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     {
         if let Some(metal) = larql_compute_metal::MetalBackend::new() {
             return Box::new(metal);
@@ -125,7 +125,7 @@ pub fn cpu_async_engine_backend() -> Box<dyn AsyncComputeBackend> {
 /// tok/s shape changes at A4 when `MetalBackend` lands real deferred
 /// dispatch (one `MTLCommandBuffer` per session).
 pub fn default_async_engine_backend() -> Box<dyn AsyncComputeBackend> {
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     {
         if let Some(metal) = larql_compute_metal::MetalBackend::new() {
             return Box::new(metal);
@@ -146,7 +146,7 @@ pub fn default_async_engine_backend() -> Box<dyn AsyncComputeBackend> {
 /// engines that want a compute backend for `q4k_prefill_metal` /
 /// `q4k_decode_token` use it.
 pub fn default_compute_backend() -> Box<dyn larql_compute::ComputeBackend> {
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     {
         if let Some(metal) = larql_compute_metal::MetalBackend::new() {
             return Box::new(metal);

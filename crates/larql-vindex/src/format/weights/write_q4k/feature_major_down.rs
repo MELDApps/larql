@@ -102,3 +102,60 @@ impl FeatureMajorDownState {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn append_layer_rejects_unsupported_format() {
+        let tmp = TempDir::new().unwrap();
+        let mut state =
+            FeatureMajorDownState::new(&tmp.path().join("down.bin"), 1).expect("new");
+        // 1 hidden row × 256 padded intermediate cols — minimum that
+        // satisfies the length debug-assert and pad_rows_to_block's
+        // 256-multiple expectation.
+        let padded = vec![0.0f32; 256];
+        let err = state
+            .append_layer(
+                "blocks.0.down".to_string(),
+                &padded,
+                1,
+                256,
+                QuantBlockFormat::Other("Q5_K".to_string()),
+            )
+            .expect_err("Other format must be rejected by the writer");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("feature-major-down writer cannot emit format"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn append_layer_q4k_roundtrip_then_finalize_writes_manifest() {
+        let tmp = TempDir::new().unwrap();
+        let bin_path = tmp.path().join("down.bin");
+        let manifest_path = tmp.path().join("down_manifest.json");
+        let mut state = FeatureMajorDownState::new(&bin_path, 2).expect("new");
+        // 2 hidden rows × 256 padded intermediate cols. Non-zero values
+        // so the quantiser produces real bytes (zero blocks compress to
+        // a degenerate path).
+        let padded: Vec<f32> = (0..2 * 256).map(|i| (i as f32) * 0.001).collect();
+        state
+            .append_layer("blocks.0.down".into(), &padded, 2, 256, QuantBlockFormat::Q4K)
+            .expect("Q4_K append");
+        state
+            .append_layer("blocks.1.down".into(), &padded, 2, 256, QuantBlockFormat::Q6K)
+            .expect("Q6_K append");
+        state.finalize(&manifest_path).expect("finalize");
+        let bin_size = std::fs::metadata(&bin_path).unwrap().len();
+        assert!(bin_size > 0, "bin file must hold quantised bytes");
+        let manifest_text = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest_text.contains("blocks.0.down"));
+        assert!(manifest_text.contains("blocks.1.down"));
+        assert!(manifest_text.contains("Q4_K"));
+        assert!(manifest_text.contains("Q6_K"));
+    }
+}

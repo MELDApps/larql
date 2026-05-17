@@ -76,6 +76,7 @@ pub fn kv_prefill_via_dispatch(
 /// `window` is forwarded to the backend's clip step per layer when
 /// `Some`. Returns the post-FFN hidden state for the new token
 /// (shape `[1, hidden]`).
+#[allow(clippy::too_many_arguments)]
 pub fn kv_decode_step_via_dispatch(
     backend: &dyn EngineBackend,
     weights: &ModelWeights,
@@ -95,17 +96,11 @@ pub fn kv_decode_step_via_dispatch(
     let h_new = embed_tokens_pub(weights, &[token_id]);
     let mut h_step = h_new;
 
-    for layer in 0..num_layers {
-        let h_post_attn = backend.attention_step(
-            weights,
-            &h_step,
-            &mut handles[layer],
-            layer,
-            abs_position,
-            index,
-        )?;
+    for (layer, handle) in handles.iter_mut().enumerate().take(num_layers) {
+        let h_post_attn =
+            backend.attention_step(weights, &h_step, handle, layer, abs_position, index)?;
         if let Some(w) = window {
-            backend.clip_kv(&mut handles[layer], w);
+            backend.clip_kv(handle, w);
         }
         let (h_out, _) = run_ffn(weights, &h_post_attn, layer, ffn, false);
         h_step = h_out;
@@ -171,6 +166,7 @@ pub fn kv_prefill_via_dispatch_async(
 /// One decode step. Reads the per-layer hidden for FFN dispatch (v1
 /// pattern). Flushes at the end of the step so the next call starts
 /// from a quiescent backend.
+#[allow(clippy::too_many_arguments)]
 pub fn kv_decode_step_via_dispatch_async(
     backend: &dyn AsyncComputeBackend,
     weights: &ModelWeights,
@@ -190,17 +186,11 @@ pub fn kv_decode_step_via_dispatch_async(
     let h_new = embed_tokens_pub(weights, &[token_id]);
     let mut h_step = h_new;
 
-    for layer in 0..num_layers {
-        let h_post_attn_handle = backend.attention_step_async(
-            weights,
-            &h_step,
-            &mut handles[layer],
-            layer,
-            abs_position,
-            index,
-        );
+    for (layer, handle) in handles.iter_mut().enumerate().take(num_layers) {
+        let h_post_attn_handle =
+            backend.attention_step_async(weights, &h_step, handle, layer, abs_position, index);
         if let Some(w) = window {
-            backend.clip_kv(&mut handles[layer], w);
+            backend.clip_kv(handle, w);
         }
         let h_post_attn = backend.read_hidden(h_post_attn_handle);
         let (h_out, _) = run_ffn(weights, &h_post_attn, layer, ffn, false);

@@ -79,9 +79,7 @@ impl QuantBlockFormat {
     /// reject unknown formats once, instead of letting the dispatch
     /// kernels report `None` per-row.
     pub fn from_registry_tag(tag: &str) -> Option<Self> {
-        if crate::quant::registry::lookup(tag).is_none() {
-            return None;
-        }
+        crate::quant::registry::lookup(tag)?;
         Some(match tag {
             "Q4_K" => Self::Q4K,
             "Q6_K" => Self::Q6K,

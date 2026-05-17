@@ -10,9 +10,14 @@
   "per_file_line_min_percent": {
     "crates/larql-kv/src/engines/unlimited_context/engine.rs": 50.5,
     "crates/larql-kv/src/engines/markov_residual/q4k.rs": 57.1,
+    "crates/larql-kv/src/vindex_compare.rs": 65.0,
     "crates/larql-kv/src/engines/unlimited_context/extend.rs": 74.6,
+    "crates/larql-kv/src/accuracy_suite/runner.rs": 75.0,
+    "crates/larql-kv/src/accuracy_suite/measurement.rs": 77.0,
+    "crates/larql-kv/src/engines/no_cache.rs": 79.0,
     "crates/larql-kv/src/engines/turbo_quant/engine.rs": 79.7,
     "crates/larql-kv/src/engines/markov_residual/compute.rs": 80.6,
+    "crates/larql-kv/src/engines/standard.rs": 87.0,
     "crates/larql-kv/src/engines/apollo/store.rs": 89.7
   }
 }

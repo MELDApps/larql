@@ -17,7 +17,7 @@
 //!
 //! Feature-gated behind `metal` (same as `larql_compute_metal::MetalBackend`).
 
-#![cfg(feature = "metal")]
+#![cfg(all(feature = "metal", target_os = "macos"))]
 
 use ndarray::Array2;
 

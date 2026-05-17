@@ -404,4 +404,76 @@ mod tests {
         assert_eq!(second.last_hidden.shape(), &[1, weights.hidden_size]);
         assert!(second.last_hidden.iter().all(|v| v.is_finite()));
     }
+
+    // ── rs_extend_from_checkpoint_q4k (vindex-backed FFN path) ───────────────
+
+    #[test]
+    fn extend_q4k_empty_tokens_returns_none() {
+        let weights = make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let prior = empty_prior(&weights);
+        let out = rs_extend_from_checkpoint_q4k(&weights, &index, &[], prior, 0, &*backend);
+        assert!(out.is_none(), "empty token_ids should return None");
+    }
+
+    #[test]
+    fn extend_q4k_wrong_prior_len_returns_none() {
+        let weights = make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let out =
+            rs_extend_from_checkpoint_q4k(&weights, &index, &[0u32], Vec::new(), 0, &*backend);
+        assert!(out.is_none(), "prior length mismatch should return None");
+    }
+
+    #[test]
+    fn extend_q4k_grows_kv_cache_and_returns_finite() {
+        let weights = make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let prior = empty_prior(&weights);
+        let out =
+            rs_extend_from_checkpoint_q4k(&weights, &index, &[0u32, 1, 2], prior, 0, &*backend)
+                .expect("3-token Q4K extend");
+        assert_eq!(out.last_hidden.shape(), &[1, weights.hidden_size]);
+        assert!(out.last_hidden.iter().all(|v| v.is_finite()));
+        // After 3 tokens from an empty prior, each layer's K/V has 3 rows.
+        let kv_dim = weights.num_kv_heads * weights.head_dim;
+        for (k, v) in &out.kv_cache {
+            assert_eq!(k.shape(), &[3, kv_dim]);
+            assert_eq!(v.shape(), &[3, kv_dim]);
+        }
+        assert_eq!(out.new_checkpoint.len(), weights.num_layers);
+    }
+
+    #[test]
+    fn extend_q4k_seeded_from_prior_matches_shape() {
+        let weights = make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let first = rs_extend_from_checkpoint_q4k(
+            &weights,
+            &index,
+            &[0u32, 1],
+            empty_prior(&weights),
+            0,
+            &*backend,
+        )
+        .expect("first extend");
+        let second = rs_extend_from_checkpoint_q4k(
+            &weights,
+            &index,
+            &[2u32],
+            first.kv_cache.clone(),
+            2,
+            &*backend,
+        )
+        .expect("extend over prior kv");
+        assert_eq!(second.last_hidden.shape(), &[1, weights.hidden_size]);
+        let kv_dim = weights.num_kv_heads * weights.head_dim;
+        for (k, _) in &second.kv_cache {
+            assert_eq!(k.shape(), &[3, kv_dim], "prior(2) + new(1) = 3 rows");
+        }
+    }
 }

@@ -751,4 +751,53 @@ mod integration_tests {
             "3-bit should use less memory than 4-bit"
         );
     }
+
+    // ── Q4K paths via CPU fallback ────────────────────────────────────────
+    //
+    // `q4k_prefill_metal` / `q4k_decode_token` return `None` on a CPU
+    // backend, so the engine falls through to `prefill_q4k_cpu` /
+    // `decode_step_q4k_cpu` against the synthetic VectorIndex. Exercises
+    // the Q4K branches without needing a real Metal-quantised model.
+
+    #[test]
+    fn prefill_q4k_cpu_fallback_compresses_kv() {
+        use larql_inference::ffn::NullFfn;
+        let mut weights = make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let ffn = NullFfn;
+        let mut engine = TurboQuantEngine::new(4);
+        let h = engine
+            .prefill_q4k(&mut weights, &ffn, &index, &[0u32, 1, 2], &*backend)
+            .expect("prefill_q4k cpu fallback");
+        assert_eq!(h.shape(), &[1, weights.hidden_size]);
+        assert_eq!(
+            engine.layers.len(),
+            weights.num_layers,
+            "one CompressedLayer per model layer after prefill_q4k"
+        );
+        assert!(engine.memory_bytes() > 0);
+    }
+
+    #[test]
+    fn decode_step_q4k_cpu_fallback_grows_compressed_cache() {
+        use larql_inference::ffn::NullFfn;
+        let mut weights = make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let ffn = NullFfn;
+        let mut engine = TurboQuantEngine::new(4);
+        engine
+            .prefill_q4k(&mut weights, &ffn, &index, &[0u32, 1], &*backend)
+            .expect("prefill_q4k");
+        let mem_before = engine.memory_bytes();
+        let h = engine
+            .decode_step_q4k(&mut weights, &ffn, &index, 2, &*backend)
+            .expect("decode_step_q4k cpu fallback");
+        assert_eq!(h.shape(), &[1, weights.hidden_size]);
+        assert!(
+            engine.memory_bytes() > mem_before,
+            "compressed cache should grow after decode_step_q4k"
+        );
+    }
 }

@@ -139,7 +139,7 @@ async fn shard_endpoint_streams_tar_of_directory() {
     // Populate a vindex-like directory.
     std::fs::write(tmp.path().join("index.json"), b"{\"hello\":\"world\"}").unwrap();
     std::fs::create_dir_all(tmp.path().join("layer-0")).unwrap();
-    std::fs::write(tmp.path().join("layer-0/data.bin"), &[1u8, 2, 3, 4]).unwrap();
+    std::fs::write(tmp.path().join("layer-0/data.bin"), [1u8, 2, 3, 4]).unwrap();
 
     let model = model_with_path("m", tmp.path().to_path_buf());
     let app_state = state(vec![model]);

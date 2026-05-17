@@ -286,3 +286,119 @@ async fn walk_ffn_q8k_returns_404_when_vindex_has_no_q4k() {
         resp.status()
     );
 }
+
+// ── Binary batch request shape (BATCH_MARKER decode + multi-entry encode) ───────
+
+fn build_binary_batch_request(layers: &[u32], seq_len: u32, residual: &[f32]) -> Vec<u8> {
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // BATCH_MARKER
+    body.extend_from_slice(&(layers.len() as u32).to_le_bytes());
+    for &l in layers {
+        body.extend_from_slice(&l.to_le_bytes());
+    }
+    body.extend_from_slice(&seq_len.to_le_bytes());
+    body.extend_from_slice(&1u32.to_le_bytes()); // flags=1 → full_output=true
+    body.extend_from_slice(&8u32.to_le_bytes()); // top_k
+    for v in residual {
+        body.extend_from_slice(&v.to_le_bytes());
+    }
+    body
+}
+
+async fn post_binary(body: Vec<u8>, accept: Option<&str>) -> axum::http::Response<Body> {
+    let (model, _fixture) = common::model_with_real_weights("synthetic");
+    let state = common::state(vec![model]);
+    let app = larql_server::routes::single_model_router(state);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/v1/walk-ffn")
+        .header(header::CONTENT_TYPE, "application/x-larql-ffn");
+    if let Some(a) = accept {
+        req = req.header(header::ACCEPT, a);
+    }
+    let resp = app
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    drop(_fixture);
+    resp
+}
+
+#[tokio::test]
+async fn walk_ffn_binary_batch_request_decodes_and_multi_entry_encodes() {
+    // Two layers + full_output triggers decode_binary_request's
+    // BATCH_MARKER branch AND the multi-entry encode path (line ~252).
+    let body = build_binary_batch_request(&[0, 1], 1, &residual_of(SYN_HIDDEN));
+    let resp = post_binary(body, None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn walk_ffn_binary_batch_f16_negotiation_hits_multi_entry_f16_encode() {
+    // Multi-layer batch + Accept f16 covers encode_binary_output_f16
+    // multi-entry branch (L285-299).
+    let body = build_binary_batch_request(&[0, 1], 1, &residual_of(SYN_HIDDEN));
+    let resp = post_binary(body, Some("application/x-larql-ffn-f16")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn walk_ffn_binary_single_i8_negotiation_hits_i8_quantise() {
+    // Single layer + Accept i8 covers encode_binary_output_i8
+    // single-entry branch (L320-331).
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(&0u32.to_le_bytes()); // layer
+    body.extend_from_slice(&1u32.to_le_bytes()); // seq_len
+    body.extend_from_slice(&1u32.to_le_bytes()); // flags=1
+    body.extend_from_slice(&8u32.to_le_bytes()); // top_k
+    for v in residual_of(SYN_HIDDEN) {
+        body.extend_from_slice(&v.to_le_bytes());
+    }
+    let resp = post_binary(body, Some("application/x-larql-ffn-i8")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn walk_ffn_binary_batch_i8_negotiation_hits_multi_entry_i8_encode() {
+    // Multi-layer batch + Accept i8 covers encode_binary_output_i8
+    // multi-entry branch (L332-348).
+    let body = build_binary_batch_request(&[0, 1], 1, &residual_of(SYN_HIDDEN));
+    let resp = post_binary(body, Some("application/x-larql-ffn-i8")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn walk_ffn_binary_truncated_header_returns_400() {
+    // < 16 bytes — hits decode_binary_request's first guard.
+    let resp = post_binary(vec![0u8; 4], None).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn walk_ffn_binary_batch_truncated_layer_indices_returns_400() {
+    // BATCH_MARKER + claims 4 layers but only includes 1 → truncated.
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    body.extend_from_slice(&4u32.to_le_bytes()); // 4 layers claimed
+    body.extend_from_slice(&0u32.to_le_bytes()); // only 1 actually present
+                                                 // Pad to >= 16 bytes so the first guard doesn't fire, but
+                                                 // truncate before all 4 layer indices land.
+    body.extend_from_slice(&[0u8; 4]);
+    let resp = post_binary(body, None).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn walk_ffn_binary_residual_not_multiple_of_4_returns_400() {
+    // header_end + 12 + odd-byte tail → "residual byte length is not a
+    // multiple of 4" branch in decode_binary_request.
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(&0u32.to_le_bytes());
+    body.extend_from_slice(&1u32.to_le_bytes());
+    body.extend_from_slice(&1u32.to_le_bytes());
+    body.extend_from_slice(&8u32.to_le_bytes());
+    // Residual block of 1 byte (not multiple of 4)
+    body.push(0u8);
+    let resp = post_binary(body, None).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

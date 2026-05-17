@@ -481,7 +481,7 @@ mod tests {
     /// fixture installs one via `set_lm_head_q4_mmap`.
     #[test]
     fn lm_head_predict_uses_q4_lm_head_when_available() {
-        let mut fx = Q4KTestFixtures::build();
+        let fx = Q4KTestFixtures::build();
         // Build a synthetic hidden vector roughly the right scale
         // (post-RMS-norm + final-norm magnitudes ≈ 1).
         let h = ndarray::Array2::from_shape_fn((1, fx.weights.hidden_size), |(_, j)| {
@@ -494,14 +494,7 @@ mod tests {
             "synthetic vindex must carry a Q4_K lm_head view"
         );
         let vocab = fx.weights.vocab_size;
-        let result = lm_head_predict(
-            &mut fx.weights,
-            &h,
-            &fx.tokenizer,
-            &backend,
-            q4_lm_head,
-            vocab,
-        );
+        let result = lm_head_predict(&fx.weights, &h, &fx.tokenizer, &backend, q4_lm_head, vocab);
         assert!(
             !result.token_ids.is_empty(),
             "must return at least one token id"
@@ -516,14 +509,14 @@ mod tests {
     /// `logits_to_predictions_pub`.
     #[test]
     fn lm_head_predict_falls_back_to_f32_when_q4_unavailable() {
-        let mut fx = Q4KTestFixtures::build();
+        let fx = Q4KTestFixtures::build();
         let h = ndarray::Array2::from_shape_fn((1, fx.weights.hidden_size), |(_, j)| {
             ((j as f32) * 0.013).sin() * 0.5
         });
         let backend = larql_compute::CpuBackend;
         let vocab = fx.weights.vocab_size;
         // Pass None to force the f32 fallback path.
-        let result = lm_head_predict(&mut fx.weights, &h, &fx.tokenizer, &backend, None, vocab);
+        let result = lm_head_predict(&fx.weights, &h, &fx.tokenizer, &backend, None, vocab);
         assert!(!result.token_ids.is_empty());
     }
 
@@ -597,14 +590,14 @@ mod more_tests {
     /// (the Q4 branch requires vocab > 0).
     #[test]
     fn lm_head_predict_zero_vocab_falls_back() {
-        let mut fx = Q4KTestFixtures::build();
+        let fx = Q4KTestFixtures::build();
         let h = Array2::from_shape_fn((1, fx.weights.hidden_size), |(_, j)| {
             ((j as f32) * 0.013).sin() * 0.5
         });
         let backend = larql_compute::CpuBackend;
         let q4_lm_head: Option<&[u8]> = fx.index.storage.lm_head_q4_view().map(|b| b.as_ref());
         // vocab=0 — Q4 path is gated by `vocab > 0`; falls back to f32.
-        let _result = lm_head_predict(&mut fx.weights, &h, &fx.tokenizer, &backend, q4_lm_head, 0);
+        let _result = lm_head_predict(&fx.weights, &h, &fx.tokenizer, &backend, q4_lm_head, 0);
         // The f32 fallback may produce predictions or empty depending on
         // tokenizer — what we're verifying is that it doesn't panic.
     }

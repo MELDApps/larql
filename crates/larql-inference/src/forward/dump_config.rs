@@ -46,7 +46,6 @@
 //! [`cpu_stage_prefix`] therefore only finds files when `layer == 0`. Any
 //! future fix should change both sides together.
 
-
 // ── Env var names ──────────────────────────────────────────────────────────
 
 /// `LARQL_CPU_DUMP_LAYERS=<dir>` — read by [`DumpConfig`].

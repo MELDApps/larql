@@ -158,6 +158,7 @@ larql-kv/
 │       └── unlimited_context/    — windowed re-prefill from checkpoints
 ├── benches/            — criterion microbenchmarks
 ├── examples/           — end-to-end demos on synthetic test_utils
+├── baselines/          — committed `larql accuracy` regression baselines
 └── coverage-policy.json — per-file ≥90% line-coverage policy
 ```
 

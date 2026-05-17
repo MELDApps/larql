@@ -56,7 +56,7 @@
 
 pub mod cpu;
 pub mod helpers;
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
 
 use crate::model::ModelWeights;
@@ -222,13 +222,16 @@ pub trait KvDispatch {
     /// that don't support fused attention return `None`; callers fall
     /// back to decomposed BLAS attention via [`larql_compute::MatMul`]
     /// + manual K/V management.
+    ///
     /// `index` is `Some` when the caller has a Q4K (or other
     /// quantised) `VectorIndex` available alongside the f32 fallback
     /// in `weights.tensors`. Backends with native Q4K kernels (e.g.
     /// `MetalBackend` once A4 lands) use it directly; CPU backends
-    /// today expect the caller to have already populated `weights.tensors`
-    /// via [`crate::vindex::ensure_attn_tensors_dequantised`] when
-    /// the quantised source is present.
+    /// today expect the caller to have already populated
+    /// `weights.tensors` via
+    /// [`crate::vindex::ensure_attn_tensors_dequantised`] when the
+    /// quantised source is present.
+    ///
     /// See `docs/specs/kv-dispatch-quantization.md`.
     fn attention_step(
         &self,
@@ -253,6 +256,7 @@ pub trait KvDispatch {
     /// runs [`Self::attention_step`] then [`Self::clip_kv`] (correct
     /// but not specialised). `index` is forwarded to the underlying
     /// `attention_step` call.
+    #[allow(clippy::too_many_arguments)]
     fn attention_step_windowed(
         &self,
         weights: &ModelWeights,

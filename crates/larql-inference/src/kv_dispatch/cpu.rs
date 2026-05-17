@@ -40,6 +40,10 @@ use crate::model::ModelWeights;
 /// `SharedKV = (K, V)` shape — `K` and `V` are owned `Array2<f32>`
 /// growing by one row per `append_kv` call.
 pub struct CpuKvHandle {
+    /// Layer index this handle was minted for. Carried for debugging
+    /// / future trait surface; not consulted by the current append /
+    /// attend paths (the trait already takes `layer` per call).
+    #[allow(dead_code)]
     layer: usize,
     kv_dim: usize,
     /// `None` before the first `append_kv` / `attention_prefill`.

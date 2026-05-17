@@ -6,6 +6,116 @@ The format follows the conventions of [Keep a Changelog](https://keepachangelog.
 with dated entries (`YYYY-MM-DD`) instead of semantic versions during the
 pre-1.0 phase. Forward-looking work lives in [`ROADMAP.md`](ROADMAP.md).
 
+## [2026-05-17] — infer.rs un-excluded; fixture wall hit on chat/completions/stream
+
+Continued coverage push. `routes/infer.rs` joins `routes/explain.rs`
+in the included set (50% → 97% with 9 new integration tests +
+2 new in-file unit tests for `format_knn_override`). Started
+coverage tests for `routes/openai/completions.rs` and
+`routes/expert/warmup.rs` — both plateau without further fixture
+work:
+
+- **`openai/completions.rs` (40% → 56%)**: synthetic vindex's
+  diagonal-ish f32 weights NaN partway through
+  `generate_with_sampling`, so the per-prompt completion-loop body
+  + the streaming spawn_blocking body stay uncovered. Tests
+  exercise the handler validation (n>1, empty prompt, echo+stream
+  rejection, batched+stream rejection, sampling params, stop
+  strings, logprobs, SSE content-type), which lifts the entry
+  branches. Stays excluded until stable synthetic generation weights
+  land. 12 integration tests pass.
+- **`expert/warmup.rs` (0% → 9%)**: only the env-gated and
+  `is_hybrid_moe() == false` early-return branches are reachable
+  with the current dense-llama synthetic. The deeper unit/expert
+  filter resolution + HNSW build path needs a synthetic hybrid-MoE
+  arch (router weights + N experts). 2 integration tests pass.
+
+### Realistic-ceiling note
+
+Pushing the remaining excluded files (`openai/chat.rs`,
+`openai/completions.rs`, `stream.rs`, all `expert/*.rs`,
+`walk_ffn/core.rs`, `walk_ffn/q8k.rs`) above 90% requires three
+substantial fixture extensions:
+
+1. **Stable generation weights** — synthetic vindex weights tuned
+   so `predict_with_ffn` / `generate_with_sampling` produce
+   finite (non-NaN) output for multiple tokens. Unlocks chat,
+   completions, stream, infer's compare-mode deeper paths.
+2. **Synthetic hybrid-MoE vindex** — router_proj + N expert weights
+   + arch override returning `is_hybrid_moe() == true`. Unlocks
+   all `expert/*.rs` files + `walk_ffn/core.rs`'s MoE branch.
+3. **Synthetic Q4K-quantised vindex** — different storage format
+   (interleaved_q4k.bin etc). Unlocks `walk_ffn/q8k.rs`.
+
+Each is ~1-2 days of fixture engineering. The honest path to total
+≥ 90% is to land those fixtures, not to keep adding ineffective
+tests against the current dense-llama synthetic.
+
+### Headline numbers (this session)
+
+| Metric | Pre-session | End of session |
+|---|---|---|
+| Total | 69.82% | **74.52%** (+4.70 pp) |
+| Included files | 91.87% | **92.61%** |
+| Files at 90% default | 26 | **32** (+6) |
+| Files excluded | 13 | 12 (replaced walk_ffn.rs monolith with core.rs + q8k.rs; net −1 after explain + infer un-exclusion) |
+| Test count | 739 | **804** (+65) |
+
+## [2026-05-17] — walk_ffn split into a module folder + coverage progress
+
+Continuing the coverage push: split the 1434-line `routes/walk_ffn.rs`
+monolith into a 7-file `routes/walk_ffn/` module folder, then drove
+coverage on the new sub-files. Net: total 71.18% → **73.76%**;
+included 91.98% → **92.42%**; 27 → **31** files at default 90%.
+
+### Changed
+
+- **`routes/walk_ffn.rs` → `routes/walk_ffn/`**: split into seven
+  files matching the natural section headers in the original:
+  - `types.rs` (100%) — `WalkFfnRequest`, `FfnEntry`, `FfnOutput`,
+    `RifGuard`, `BINARY_CT`, `BATCH_MARKER`.
+  - `binary.rs` (98.56%) — codec (`decode_binary_request`,
+    `encode_binary_output` / `_f16` / `_i8`, `encode_json_full_output`)
+    + the existing in-file unit tests + new tests for the f16 / i8
+    encoder branches that the previous monolith left uncovered.
+  - `validate.rs` (93.55%) — pure-function validators
+    (`collect_scan_layers`, `validate_residual`, `validate_owned`)
+    with 7 new in-file unit tests.
+  - `dispatch.rs` (98.39%) — JSON entry (`run_walk_ffn` +
+    `run_full_output` / `run_features_only`).
+  - `handler.rs` (86.90% — debt baseline) — axum entrypoint
+    `handle_walk_ffn`. The 13% uncovered are error paths inside
+    `tokio::task::spawn_blocking` closures (no-model-loaded,
+    read-body-error, JSON-serialize-error) that are hard to drive
+    from integration tests without a special harness.
+  - `core.rs` (24.89% — still excluded) — `run_full_output_core`.
+    The MoE branches (~80 lines) need a remote-MoE backend the
+    synthetic fixture doesn't provide.
+  - `q8k.rs` (34.18% — still excluded) — `handle_walk_ffn_q8k`. Needs
+    a Q4K-quantised vindex; same fixture gap.
+  - `mod.rs` — re-exports preserving `crate::routes::walk_ffn::X`
+    paths so callers (`routes/mod.rs`, `openapi.rs`) didn't have
+    to change. utoipa's generated `__path_*` types are re-exported
+    so the `#[derive(OpenApi)]` macro keeps finding them at the
+    pre-split path.
+
+### Coverage policy
+
+- `routes/walk_ffn.rs` removed from `exclude_globs`; replaced with
+  `routes/walk_ffn/core.rs` + `routes/walk_ffn/q8k.rs` (the two
+  submodules that need MoE / Q4K fixtures to cover).
+- `routes/walk_ffn/handler.rs` added at 86% debt baseline.
+- Gate: total 73.76% lines, included 92.42%, 42 files checked,
+  31 at default 90%, 11 debt baselines. **Up from 36 files / 26 at
+  default / 10 baselines pre-split.**
+
+### Tests
+
+- 787 server tests pass (was 748 at start of session, +39 from
+  walk_ffn split's in-file unit tests + coverage tests + new
+  validate tests). No regressions across `test_grid_*`,
+  `test_http_*`, `test_synthetic_vindex`, `test_walk_ffn_coverage`.
+
 ## [2026-05-17] — Synthetic-vindex test fixture + coverage push begins
 
 Phase 1 of the larql-server coverage push (target: total ≥ 90%). Built

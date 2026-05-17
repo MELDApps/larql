@@ -48,7 +48,7 @@
 //! sequencing.
 
 pub mod cpu;
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
 
 use crate::ffn::FfnBackend;
@@ -316,6 +316,7 @@ pub trait AsyncComputeBackend: larql_compute::ComputeBackend + KvDispatch + Send
     /// Default decomposition: dispatch the unbounded variant, then
     /// [`KvDispatch::clip_kv`] the cache to `window` rows. Backends with
     /// a fused windowed-attention shader (Step A6) override.
+    #[allow(clippy::too_many_arguments)]
     fn attention_step_windowed_async(
         &self,
         weights: &ModelWeights,

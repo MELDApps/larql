@@ -515,4 +515,35 @@ mod tests {
         let (_, rs3) = rs_decode_step(&weights, 3, rs2, &CpuBackend).unwrap();
         assert_eq!(rs3.next_position, 4);
     }
+
+    #[test]
+    fn rs_decode_step_with_cold_kv_branch_produces_finite_output() {
+        // Windowed prefill with prompt longer than window forces cold_kv
+        // population (compute.rs lines 60-68), then decode hits the
+        // `Some(cold_kv)` branch (lines 128-147) instead of the
+        // cold-residual recomputation path.
+        let weights = make_test_weights();
+        let prefill = rs_prefill(&weights, &[0u32, 1, 2, 3], Some(2), &CpuBackend);
+        assert!(prefill.store.cold_kv.is_some(), "expected cold_kv to be set");
+        let (h, rs2) = rs_decode_step(&weights, 4, prefill.store, &CpuBackend)
+            .expect("decode_step over cold_kv");
+        assert_eq!(h.shape(), &[1, weights.hidden_size]);
+        assert!(h.iter().all(|v| v.is_finite()));
+        // After overflow merges into cold_residuals, cold_kv is cleared
+        // (compute.rs line 260) so a second decode exercises the
+        // cold_residuals-only branch (lines 149-160).
+        let (h2, _) = rs_decode_step(&weights, 5, rs2, &CpuBackend)
+            .expect("decode_step over cold_residuals");
+        assert_eq!(h2.shape(), &[1, weights.hidden_size]);
+        assert!(h2.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn kv_memory_bytes_for_seq_scales_linearly() {
+        let weights = make_test_weights();
+        let one = kv_memory_bytes_for_seq(&weights, 1);
+        let ten = kv_memory_bytes_for_seq(&weights, 10);
+        assert!(one > 0);
+        assert_eq!(ten, one * 10, "kv memory must scale linearly with seq len");
+    }
 }

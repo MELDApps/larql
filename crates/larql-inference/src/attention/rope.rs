@@ -118,6 +118,7 @@ pub fn apply_rope_partial_at_scaled(
 /// with HF's `llama3` wavelength-dependent variant. `position_divisor` and
 /// `llama3_scaling` compose independently — the divisor scales the
 /// position, llama3 scales the per-channel frequency.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_rope_partial_at_full(
     x: &Array2<f32>,
     num_heads: usize,
