@@ -2214,6 +2214,7 @@ version = "0.1.0"
 dependencies = [
  "blas-src",
  "criterion",
+ "larql-boundary",
  "larql-compute",
  "larql-compute-metal",
  "larql-inference",

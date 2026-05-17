@@ -78,7 +78,10 @@ pub(super) fn hf_repo_url(repo_type: &str, repo_id: &str) -> String {
     }
 }
 
-/// Upload a local vindex directory to HuggingFace as a dataset repo.
+/// Upload a local vindex directory to HuggingFace as a model repo
+/// (the [`PublishOptions::default`] `repo_type`). Pass a customised
+/// `PublishOptions` to [`publish_vindex_with_opts`] to publish under
+/// the datasets namespace instead.
 ///
 /// Equivalent to `publish_vindex_with_opts(dir, repo_id, &PublishOptions::default(), cb)`.
 /// Requires HF_TOKEN environment variable or ~/.huggingface/token.

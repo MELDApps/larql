@@ -13,6 +13,7 @@ larql-inference = { path = "../larql-inference" }
 larql-compute = { path = "../larql-compute" }
 larql-compute-metal = { path = "../larql-compute-metal", optional = true }
 larql-vindex = { path = "../larql-vindex" }
+larql-boundary = { path = "../larql-boundary" }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

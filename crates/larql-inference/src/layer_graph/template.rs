@@ -549,11 +549,44 @@ mod tests {
         }
     }
 
+    /// `TemplateUniverse::build` entity loop body — lines 80-113.
+    ///
+    /// `universe_build_empty_entities_is_empty` covers the no-entity
+    /// scaffolding; this test drives the body by passing real entities
+    /// through a pre-tokenizer-free tokenizer (built from the same JSON
+    /// the on-disk fixture uses) so `tokenizer.encode("[0] [1]")` lands
+    /// in-vocab and `trace_forward_full` completes without UNK panics.
+    #[test]
+    fn universe_build_with_real_entities_drives_loop_body() {
+        let w = weights();
+        let ffn = WeightFfn { weights: w };
+        // pre_tokenizer = null tokenizer so "[N]" stays a single token.
+        let tok_json = crate::test_utils::synthetic_tokenizer_json(w.vocab_size);
+        let tokenizer = tokenizers::Tokenizer::from_bytes(tok_json.as_bytes()).expect("tokenizer");
+        let universe = TemplateUniverse::build(
+            w,
+            &tokenizer,
+            "real-entities",
+            "[5] {}",
+            &["[0]", "[1]", "[2]"],
+            &ffn,
+            0.0, // floor=0 ⇒ insert every fired feature, exercising both branches.
+        );
+        assert_eq!(universe.name, "real-entities");
+        // Body of the loop should have inserted at least *some* features
+        // somewhere across the 2-layer fixture — the inner
+        // `set.insert(*feat)` branch is what we want covered.
+        assert!(
+            universe.total_features() > 0,
+            "build should populate feature set across layers"
+        );
+    }
+
     /// With an interleaved-f32 vindex populated, the guided walk path
     /// reaches the inner per-feature loop (lines 240-269): `up_layer_matrix`
     /// + `down_layer_matrix` + `gate_scores_batch` all return Some, so the
-    /// `gate_scores` accumulation runs across the supplied universe features
-    /// for every position.
+    ///   `gate_scores` accumulation runs across the supplied universe features
+    ///   for every position.
     #[test]
     fn guided_walk_with_interleaved_f32_runs_inner_accumulation_loop() {
         use crate::test_utils::InterleavedF32TestFixtures;

@@ -47,7 +47,10 @@
 //!   `crystal_layer..num_layers` layers (~4 instead of 34), ~8.5× faster per step.
 
 pub mod apollo;
+pub mod boundary_kv;
+pub mod boundary_per_layer;
 pub mod markov_residual;
+pub mod markov_residual_codec;
 pub mod no_cache;
 pub mod standard;
 pub mod turbo_quant;

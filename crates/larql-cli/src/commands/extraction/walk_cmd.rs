@@ -1083,6 +1083,8 @@ fn generate_stream(
                 EngineKind::UnlimitedContext { .. } => "engine=unlimited-context",
                 EngineKind::TurboQuant { .. } => "engine=turbo-quant",
                 EngineKind::Apollo { .. } => "engine=apollo",
+                EngineKind::BoundaryKv { .. } => "engine=boundary-kv",
+                EngineKind::MarkovResidualCodec { .. } => "engine=markov-rs-codec",
             };
             (kind, label)
         }

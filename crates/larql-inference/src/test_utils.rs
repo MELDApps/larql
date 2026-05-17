@@ -511,7 +511,11 @@ pub fn write_synthetic_q4k_model_dir(dir: &std::path::Path) -> Result<(), String
 /// hits a valid embedding row — saves the embed lookup from panicking
 /// with "Index N must be less than axis length N" when something
 /// outside the bracket form sneaks into encoding.
-fn synthetic_tokenizer_json(vocab_size: usize) -> String {
+/// Build the on-disk tokenizer JSON whose vocab is `[0]`..`[vocab_size-1]`
+/// and whose `pre_tokenizer` is **null** — bracketed forms encode as a
+/// single token. Public so tests can build a matching in-memory
+/// `Tokenizer` without going through `write_synthetic_model_dir`.
+pub fn synthetic_tokenizer_json(vocab_size: usize) -> String {
     let mut vocab_json = serde_json::Map::new();
     for i in 0..vocab_size as u64 {
         vocab_json.insert(format!("[{i}]"), serde_json::Value::Number(i.into()));

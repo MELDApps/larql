@@ -18,12 +18,15 @@ use super::publish::get_hf_token;
 use super::{vindex_core_files, VINDEX_METADATA_FILES, VINDEX_WEIGHT_FILES};
 use helpers::{hf_cache_repo_dir, strip_etag_quoting, want_model_file};
 
-/// Which side of the HF API a repo lives on. Datasets are how vindexes
-/// are stored; Models is the canonical home of safetensors / GGUF / etc.
+/// Which side of the HF API a repo lives on. Vindexes are published as
+/// models (quantized weight artifacts + manifests); the `Dataset` variant
+/// remains for the helper-level tests that exercise both cache prefixes
+/// and for any caller that explicitly targets the datasets namespace.
 /// Both share the same blob-cache layout but differ in the URL prefix
 /// and the `{datasets,models}--` cache-dir prefix.
 #[derive(Clone, Copy)]
 pub(super) enum RepoKind {
+    #[allow(dead_code)]
     Dataset,
     Model,
 }
@@ -52,11 +55,10 @@ impl RepoKind {
 }
 
 /// Order in which `larql pull` probes HF for an `hf://owner/name` path.
-/// `larql publish` defaults to `repo_type = "model"`, so model is tried
-/// first; dataset stays as the fallback for older vindexes that were
-/// uploaded before the publish default flipped (and for docs examples
-/// that pin `--repo-type dataset`).
-const HF_PULL_REPO_KINDS: [RepoKind; 2] = [RepoKind::Model, RepoKind::Dataset];
+/// Vindexes are model artifacts, so only the models namespace is probed;
+/// the legacy dataset fallback was removed once all published vindexes
+/// (e.g. `chrishayuk/*-vindex`) lived under `models--`.
+const HF_PULL_REPO_KINDS: [RepoKind; 1] = [RepoKind::Model];
 
 /// Build a typed `ApiRepo` handle for a given `(repo_id, revision, kind)`.
 /// Centralised so the three pull entry points share one constructor and
@@ -623,8 +625,9 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_hf_vindex_errors_when_both_repo_kinds_404() {
-        // mockito returns 404 for every URL → both Model and Dataset
-        // probes fail in turn → resolve_hf_vindex returns the wrapped
+        // mockito returns 404 for every URL → the Model probe (the only
+        // entry in HF_PULL_REPO_KINDS now that the dataset fallback is
+        // gone) fails → resolve_hf_vindex returns the wrapped
         // "failed to download index.json" error. Exercises: hf:// strip,
         // no-revision branch, Api::new(), full HF_PULL_REPO_KINDS loop.
         let mut server = mockito::Server::new();
@@ -668,9 +671,10 @@ mod tests {
     #[serial]
     fn download_hf_weights_errors_when_no_repo_kind_has_index_json() {
         // `download_hf_weights` now uses index.json as the "does this repo
-        // type exist?" probe. When both Model and Dataset 404 on
-        // index.json, the function returns the "failed to fetch
-        // index.json" error rather than silently succeeding.
+        // type exist?" probe. When the Model probe 404s on index.json
+        // (and there's no longer a dataset fallback), the function
+        // returns the "failed to fetch index.json" error rather than
+        // silently succeeding.
         let mut server = mockito::Server::new();
         let _g = HfTestEnv::new(&server.url());
         let _m = server

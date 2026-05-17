@@ -49,6 +49,10 @@ fn main() {
         "turbo-quant:bits=4",
         "tq3",
         "apollo:layer=1,coef=8.0,top_k=4",
+        "boundary-kv:chunk_tokens=4,sequence_id=demo",
+        "boundary-kv:window=4,chunk_tokens=4,sequence_id=demo-bounded",
+        "markov-rs-codec",
+        "markov-rs-codec:window=4",
     ];
 
     println!("larql-kv engine ladder (synthetic 2-layer model)\n");

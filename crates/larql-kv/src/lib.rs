@@ -27,7 +27,10 @@ pub mod vindex_compare;
 pub use cache::KvCache;
 
 pub use engines::apollo;
+pub use engines::boundary_kv;
+pub use engines::boundary_per_layer;
 pub use engines::markov_residual;
+pub use engines::markov_residual_codec;
 pub use engines::no_cache;
 pub use engines::standard;
 pub use engines::turbo_quant;
@@ -77,6 +80,21 @@ pub enum EngineKind {
         injection_layer: usize,
         inject_coefficient: f32,
         top_k: usize,
+    },
+    /// `BoundaryKvEngine`: Standard semantics + per-chunk
+    /// `larql-boundary` frame emission. See
+    /// `crates/larql-inference/docs/specs/boundary-kv-engine.md`.
+    BoundaryKv {
+        window_size: Option<usize>,
+        chunk_tokens: usize,
+        sequence_id: String,
+    },
+    /// `MarkovResidualCodecEngine`: MarkovResidualEngine with a codec-encoded
+    /// cold tier. v0.1 ships `Bf16` codec only. See
+    /// `crates/larql-inference/docs/specs/markov-residual-codec-engine.md`.
+    MarkovResidualCodec {
+        window_size: Option<usize>,
+        codec: markov_residual_codec::ColdResidualCodec,
     },
 }
 
@@ -151,6 +169,24 @@ impl EngineKind {
                     top_k: get_usize("top_k", cfg.top_k),
                 })
             }
+            "boundary-kv" | "boundary_kv" | "boundary" => Some(EngineKind::BoundaryKv {
+                window_size: params.get("window").and_then(|v| v.parse().ok()),
+                chunk_tokens: get_usize("chunk_tokens", 512),
+                sequence_id: params
+                    .get("sequence_id")
+                    .map(|s| (*s).to_string())
+                    .unwrap_or_else(|| "default".into()),
+            }),
+            "markov-rs-codec"
+            | "markov_rs_codec"
+            | "markov-residual-codec"
+            | "markov_residual_codec" => Some(EngineKind::MarkovResidualCodec {
+                window_size: params.get("window").and_then(|v| v.parse().ok()),
+                // v0.1: bf16 is the only safely-defaultable codec; other
+                // ColdResidualCodec variants require explicit per-architecture
+                // calibration that does not yet exist in tree.
+                codec: markov_residual_codec::ColdResidualCodec::Bf16,
+            }),
             _ => None,
         }
     }
@@ -163,6 +199,8 @@ impl EngineKind {
             EngineKind::UnlimitedContext { .. } => "unlimited-context",
             EngineKind::TurboQuant { .. } => "turbo-quant",
             EngineKind::Apollo { .. } => "apollo",
+            EngineKind::BoundaryKv { .. } => "boundary-kv",
+            EngineKind::MarkovResidualCodec { .. } => "markov-rs-codec",
         }
     }
 
@@ -211,6 +249,24 @@ impl EngineKind {
                 inject_coefficient,
                 top_k,
             })),
+            EngineKind::BoundaryKv {
+                window_size,
+                chunk_tokens,
+                sequence_id,
+            } => {
+                let identity = boundary_kv::BoundaryModelIdentity::placeholder("boundary-kv-cli");
+                let mut config = boundary_kv::BoundaryKvEngineConfig::new(sequence_id, identity);
+                config.window_size = window_size;
+                config.chunk_tokens = chunk_tokens;
+                Box::new(boundary_kv::BoundaryKvEngine::with_backend(config, backend))
+            }
+            EngineKind::MarkovResidualCodec { window_size, codec } => Box::new(
+                markov_residual_codec::MarkovResidualCodecEngine::with_backend(
+                    window_size,
+                    codec,
+                    backend,
+                ),
+            ),
         }
     }
 }

@@ -201,10 +201,9 @@ mod tests {
     fn open_inference_vindex_loads_synthetic_q4k_fixture() {
         use crate::test_utils::write_synthetic_q4k_model_dir;
         let tmp = tempfile::tempdir().unwrap();
-        write_synthetic_q4k_model_dir(tmp.path())
-            .expect("write synthetic Q4K vindex");
-        let index = open_inference_vindex(tmp.path())
-            .expect("loader should accept synthetic Q4K fixture");
+        write_synthetic_q4k_model_dir(tmp.path()).expect("write synthetic Q4K vindex");
+        let index =
+            open_inference_vindex(tmp.path()).expect("loader should accept synthetic Q4K fixture");
         // Q4K attention + FFN bytes both loaded.
         assert!(
             index.attn_kquant_layer_data(0).is_some(),
@@ -213,6 +212,49 @@ mod tests {
         assert!(
             index.has_interleaved_kquant(),
             "interleaved_q4k must be loaded"
+        );
+    }
+
+    /// "Attention present but FFN missing" — exercises the FFN-missing
+    /// error branch (lines 90-93). Touch the Q4K attention files only.
+    #[test]
+    fn loader_errors_when_attn_present_but_no_ffn() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Write a tiny valid vindex skeleton first so load_vindex doesn't
+        // fail before we reach the FFN check. Easiest: use the Q4K
+        // fixture, then delete the interleaved files.
+        use crate::test_utils::write_synthetic_q4k_model_dir;
+        write_synthetic_q4k_model_dir(tmp.path()).expect("write q4k fixture");
+        let _ = std::fs::remove_file(tmp.path().join(INTERLEAVED_Q4K_BIN));
+        let _ = std::fs::remove_file(tmp.path().join("interleaved_q4k_manifest.json"));
+        let result = open_inference_vindex(tmp.path());
+        let msg = match result {
+            Ok(_) => panic!("loader must reject vindex without FFN weights"),
+            Err(e) => format!("{e}"),
+        };
+        assert!(
+            msg.contains("no FFN weights"),
+            "error must mention missing FFN weights — got: {msg}"
+        );
+    }
+
+    /// "lm_head.bin best-effort" — loader silently loads it if present.
+    /// Use the Q4K fixture (which already writes lm_head_q4.bin) and
+    /// drop a stub `lm_head.bin` next to it. Coverage drives the
+    /// `if path.join(LM_HEAD_BIN).is_file()` arm at line 65-66.
+    #[test]
+    fn loader_loads_lm_head_when_present() {
+        use crate::test_utils::write_synthetic_q4k_model_dir;
+        let tmp = tempfile::tempdir().unwrap();
+        write_synthetic_q4k_model_dir(tmp.path()).expect("write q4k fixture");
+        // Drop a stub f32 lm_head.bin. The Q4K loader's `load_lm_head`
+        // is best-effort (`let _ = ...`), so even a malformed stub is
+        // fine — coverage is the goal.
+        std::fs::write(tmp.path().join(LM_HEAD_BIN), [0u8; 32]).expect("write stub lm_head.bin");
+        let result = open_inference_vindex(tmp.path());
+        assert!(
+            result.is_ok(),
+            "loader must accept Q4K fixture with stub lm_head.bin"
         );
     }
 
@@ -226,10 +268,8 @@ mod tests {
         use crate::test_utils::write_synthetic_q4k_model_dir;
         use larql_vindex::{load_vindex_config, SilentLoadCallbacks};
         let tmp = tempfile::tempdir().unwrap();
-        write_synthetic_q4k_model_dir(tmp.path())
-            .expect("write synthetic Q4K vindex");
-        let config =
-            load_vindex_config(tmp.path()).expect("load_vindex_config");
+        write_synthetic_q4k_model_dir(tmp.path()).expect("write synthetic Q4K vindex");
+        let config = load_vindex_config(tmp.path()).expect("load_vindex_config");
         assert_eq!(config.quant, larql_vindex::QuantFormat::Q4K);
 
         let mut cb = SilentLoadCallbacks;

@@ -466,4 +466,62 @@ mod tests {
         assert!(trace.residuals.is_empty());
         assert!(trace.activations.is_empty());
     }
+
+    /// Direct call to `predict_with_graph_vindex_logits` so the function
+    /// body is exercised even if `predict_pipeline`'s `has_lm_head` gate
+    /// shifts. Same Q4K fixture as above.
+    #[test]
+    fn predict_with_graph_vindex_logits_directly() {
+        use crate::layer_graph::WalkLayerGraph;
+        use crate::test_utils::{
+            make_test_q4k_weights, make_test_tokenizer, write_synthetic_q4k_model_dir,
+        };
+        use crate::vindex::open_inference_vindex;
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_synthetic_q4k_model_dir(tmp.path()).expect("fixture");
+        let index = open_inference_vindex(tmp.path()).expect("loader");
+
+        let weights = make_test_q4k_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let ffn = WeightFfn { weights: &weights };
+        let g = WalkLayerGraph {
+            ffn: &ffn,
+            backend: None,
+        };
+        let result =
+            predict_with_graph_vindex_logits(&weights, &tokenizer, &[0u32, 1, 2], 5, &g, &index);
+        assert!(result.predictions.len() <= 5);
+    }
+
+    /// Trace capture with activation+attention populated — drives lines
+    /// 175-189 (the `if let Some(act)` / `if let Some(attn)` arms of
+    /// `trace_with_graph`).
+    #[test]
+    fn trace_with_graph_captures_activation_and_attention() {
+        use crate::layer_graph::{DenseLayerGraph, LayerGraph};
+        let f = fx();
+        let ffn = WeightFfn {
+            weights: &f.weights,
+        };
+        let g = DenseLayerGraph {
+            ffn: &ffn,
+            backend: None,
+            capture_activation: true,
+            capture_attention: true,
+        };
+        let graph: &dyn LayerGraph = &g;
+        let trace = trace_with_graph(&f.weights, &[0u32, 1], &[0], graph);
+        assert_eq!(trace.residuals.len(), 1);
+        // DenseLayerGraph with capture_activation=true populates the
+        // Some(act) arm, capture_attention=true populates Some(attn).
+        assert!(
+            !trace.activations.is_empty(),
+            "capture_activation should populate trace.activations"
+        );
+        assert!(
+            !trace.attention.is_empty(),
+            "capture_attention should populate trace.attention"
+        );
+    }
 }
